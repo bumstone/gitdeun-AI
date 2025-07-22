@@ -1,15 +1,20 @@
+# main.py
 from fastapi import FastAPI
 from routers import auth, mindmap, recommend, meeting
 
 app = FastAPI(
-    title="Gitdeun AI Platform",
-    description="AI 기반 마인드맵 생성 및 코드 추천 시스템",
+    title="Gitdeun API",
+    description="FastAPI 기반 Git 저장소 분석 및 마인드맵 시스템",
     version="1.0.0",
+    contact={
+        "name": "Gitdeun Backend",
+        "url": "https://github.com/Gitdeun/gitdeun-MM",
+    },
     openapi_tags=[
-        {"name": "Authentication", "description": "Gemini API 로그인 관련"},
-        {"name": "Mindmap", "description": "분석 결과 마인드맵 관련 API"},
-        {"name": "Recommendation", "description": "코드 생성 추천 API"},
-        {"name": "Meeting", "description": "음성 회의록 요약/이관 API"},
+        {"name": "Authentication", "description": "Gemini 로그인 및 인증 상태"},
+        {"name": "Mindmap", "description": "코드 분석 및 마인드맵 노드/엣지 저장"},
+        {"name": "Recommendation", "description": "Gemini 기반 코드 추천"},
+        {"name": "Meeting", "description": "회의록 요약 및 마이그레이션"}
     ]
 )
 
