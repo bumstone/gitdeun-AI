@@ -18,3 +18,8 @@ class MeetingSummaryRequest(BaseModel):
 class MeetingMigrateRequest(BaseModel):
     meeting_id: str
     transcript: str
+
+class CodeParseRequest(BaseModel):
+    filename: str
+    language: str  # e.g., "python", "javascript", "java"
+    code: str

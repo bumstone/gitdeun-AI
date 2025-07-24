@@ -1,9 +1,19 @@
 # services/arangodb_service.py
+from arango import ArangoClient
+from config import ARANGODB_USERNAME, ARANGODB_PASSWORD, ARANGODB_DB
 from database.arangodb_client import db
 
-def create_mindmap_node(collection_name: str, data: dict):
+def get_db():
+    client = ArangoClient()
+    return client.db(
+        name=ARANGODB_DB,
+        username=ARANGODB_USERNAME,
+        password=ARANGODB_PASSWORD
+    )
+
+def insert_document(collection_name: str, data: dict):
     """
-    컬렉션에 노드 삽입. 존재하지 않으면 생성함.
+    컬렉션에 도큐먼트 삽입. 컬렉션 없으면 생성.
     """
     try:
         if not db.has_collection(collection_name):
@@ -13,9 +23,9 @@ def create_mindmap_node(collection_name: str, data: dict):
     except Exception as e:
         return {"error": str(e)}
 
-def get_mindmap_nodes(collection_name: str):
+def get_all_documents(collection_name: str):
     """
-    컬렉션 내 모든 노드 반환
+    컬렉션의 모든 도큐먼트 반환
     """
     try:
         if not db.has_collection(collection_name):
