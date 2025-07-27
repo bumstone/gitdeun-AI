@@ -1,0 +1,25 @@
+<included>
+    <!-- 에러의 경우 파일에 로그 처리 -->
+    <appender name="FILE-ERROR" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <!--todo 배포시 로그파일 위치 재정의-->
+        <!--        <file>/home/ubuntu/app/logs/error/error-${BY_DATE}.log</file>-->
+        <file>logs/error/error-${BY_DATE}.log</file>
+        <!--   logs/error 파일에 error-날짜.log 파일 생성     -->
+        <filter class="ch.qos.logback.classic.filter.LevelFilter">
+            <level>ERROR</level>
+            <onMatch>ACCEPT</onMatch>
+            <onMismatch>DENY</onMismatch>
+        </filter>
+        <encoder>
+            <pattern>${LOG_PATTERN_PROD}</pattern>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <!--            <fileNamePattern> /home/ubuntu/app/logs/error/error-%d{yyyy-MM-dd}.%i.log</fileNamePattern>-->
+            <fileNamePattern>logs/error/error-%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <!-- 로그파일들의 총 용량, 보관 기간 제한 -->
+            <maxHistory>30</maxHistory>
+            <totalSizeCap>3GB</totalSizeCap>
+            <maxFileSize>10MB</maxFileSize>
+        </rollingPolicy>
+    </appender>
+</included>

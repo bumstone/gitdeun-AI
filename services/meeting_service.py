@@ -1,6 +1,6 @@
 # services/meeting_service.py
 from services.gemini_service import request_gemini
-from services.arangodb_service import create_mindmap_node
+from services.arangodb_service import insert_document
 
 def summarize_meeting(transcript: str) -> str:
     """
@@ -17,5 +17,5 @@ def migrate_meeting(meeting_id: str, transcript: str) -> str:
         "type": "meeting",
         "transcript": transcript
     }
-    create_mindmap_node("meeting_notes", document)
+    insert_document("meeting_notes", document)
     return f"회의록 {meeting_id} ArangoDB에 저장 완료"

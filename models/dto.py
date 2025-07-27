@@ -23,3 +23,6 @@ class CodeParseRequest(BaseModel):
     filename: str
     language: str  # e.g., "python", "javascript", "java"
     code: str
+
+class GitRepoRequest(BaseModel):
+        repo_url: str

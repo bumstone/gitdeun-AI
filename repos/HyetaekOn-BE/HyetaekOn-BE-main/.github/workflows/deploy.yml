@@ -1,0 +1,60 @@
+name: Deploy to EC2 with Docker hub
+
+on:
+  push:
+    branches:
+      - dev
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 소스코드 체크아웃
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      # Docker hub 로그인
+      - name: Log in to Docker Hub
+        uses: docker/login-action@f4ef78c080cd8ba55a85445d5b36e214a81df20a
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Docker 이미지 빌드 및 푸시
+      - name: Build and push Docker images
+        uses: docker/build-push-action@v6.16.0
+        with:
+          context: .  # Dockerfile 위치
+          file: ./Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/hyetaek-on:latest
+
+
+
+      # 3. EC2에서 환경 변수를 설정하고 애플리케이션 실행
+      - name: Run jar on EC2 with environment variables
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{secrets.EC2_HOST}}
+          username: ${{secrets.EC2_USERNAME}}
+          key: ${{ secrets.EC2_PRIVATE_KEY }}
+          port: 22
+          script: |
+            # Docker Hub 로그인
+            echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+            # 최신 이미지 가져오기
+            sudo docker pull ${{ secrets.DOCKER_USERNAME }}/hyetaek-on:latest
+            # 기존 컨테이너 중지 및 삭제
+            sudo docker stop hyetaek-on || true
+            sudo docker rm hyetaek-on || true
+            # 새 컨테이너 실행
+            sudo docker run -d \
+            --name hyetaek-on \
+            --restart unless-stopped \
+            --env SPRING_PROFILES_ACTIVE=prod,s3Bucket \
+            --env-file ${{ secrets.EC2_TARGET_PATH }}/.env \
+            --network hyetaekon-network \
+            -p 8080:8080 \
+            -v ${{ secrets.EC2_TARGET_PATH }}/logs:/app/logs \
+            ${{ secrets.DOCKER_USERNAME }}/hyetaek-on:latest

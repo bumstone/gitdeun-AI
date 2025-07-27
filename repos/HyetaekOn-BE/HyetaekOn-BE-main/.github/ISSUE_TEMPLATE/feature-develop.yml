@@ -1,0 +1,72 @@
+name: Feature Development 🚀
+description: 개발할 기능을 정리할 때 사용하세요.
+title: "[FEAT] 제목을 입력하세요"
+labels: ["feature"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 📝 기능 개발 계획
+        개발할 기능에 대해 아래 항목을 작성해주세요. 필요한 경우 관련 팀원과 논의 사항을 정리해 주세요.
+
+        ---
+
+  - type: input
+    id: feature-summary
+    attributes:
+      label: ✍️ 기능 요약
+      description: "개발할 기능을 간단히 요약해주세요."
+      placeholder: "예: JWT 인증 토큰 갱신 기능 구현"
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+  - type: textarea
+    id: development-purpose
+    attributes:
+      label: 🎯 개발 목적
+      description: "이 기능을 개발하려는 이유나 해결하려는 문제를 작성해주세요."
+      placeholder: "예: 기존 토큰 만료 시 재로그인해야 하는 불편함을 해결하기 위해 필요합니다."
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+  - type: textarea
+    id: implementation-plan
+    attributes:
+      label: 💡 구현 계획
+      description: "이 기능을 어떻게 개발할지 구체적인 계획을 작성해주세요."
+      placeholder: "예: 리프레시 토큰을 사용해 만료된 JWT를 갱신하는 API 개발"
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+  - type: textarea
+    id: potential-impact
+    attributes:
+      label: 🔍 예상 영향 범위
+      description: "이 기능 개발이 영향을 줄 수 있는 다른 서비스, 모듈, 또는 데이터베이스를 나열해주세요."
+      placeholder: "예: AuthService, User 엔티티, Redis 캐시"
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+  - type: input
+    id: additional-notes
+    attributes:
+      label: 📌 참고 사항
+      description: "추가적인 설명이나 논의가 필요한 부분이 있으면 작성해주세요."
+      placeholder: "예: 관련된 프론트엔드 변경 사항도 필요합니다."

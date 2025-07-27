@@ -1,0 +1,60 @@
+name: Bug Fix 🛠️
+description: 수정한 버그에 대한 내용을 정리할 때 사용하세요.
+title: "[FIX] 제목을 입력하세요"
+labels: ["bug fix"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 🛠️ 버그 수정 내역
+        수정한 버그와 관련된 상세 내용을 작성해주세요.
+
+  - type: input
+    id: bug-summary
+    attributes:
+      label: 🐞 버그 요약
+      description: "수정한 버그를 간단히 요약해주세요."
+      placeholder: "예: 로그인 시 500 오류 발생 문제 수정"
+
+  - type: textarea
+    id: root-cause
+    attributes:
+      label: 🔍 원인 분석
+      description: "해당 버그의 근본 원인이 무엇인지 설명해주세요."
+      placeholder: |
+        예:
+        - NullPointerException이 발생하여 500 오류가 발생
+        - 로그인 요청 시 사용자 데이터가 정상적으로 반환되지 않음
+    validations:
+      required: false
+
+  - type: textarea
+    id: fix-details
+    attributes:
+      label: ✔️ 수정 내용
+      description: "해당 버그를 어떻게 수정했는지 구체적으로 작성해주세요."
+      placeholder: |
+        예:
+        - 로그인 API의 NullPointerException을 방지하기 위해 유효성 검사 추가
+        - 사용자 데이터가 비어 있는 경우 기본값을 반환하도록 수정
+    validations:
+      required: false
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: 🔍 영향을 준 부분
+      description: "이번 수정이 영향을 줄 수 있는 코드나 시스템 부분을 설명해주세요."
+      placeholder: |
+        예:
+        - AuthService 수정
+        - 로그인 페이지 UI에서 새로운 에러 메시지 추가
+        - Redis 세션 캐시 관련 기능 확인
+
+  - type: input
+    id: additional-context
+    attributes:
+      label: 📌 참고 사항
+      description: "수정과 관련된 추가 정보나 참고할 만한 내용을 작성해주세요."
+      placeholder: "예: 해당 수정이 Frontend 팀과의 협의가 필요함"

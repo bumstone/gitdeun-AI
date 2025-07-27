@@ -1,0 +1,15 @@
+spring:
+  datasource:
+    url: ${MYSQL_DEV_URL}  # MySQL 데이터베이스 URL
+  data:
+    redis:
+      host: localhost
+
+jwt:
+  access-expired: 3600  # 1시간
+  refresh-expired: 7200  # 2시간
+
+app:
+  cookie:
+    secure: false
+    same-site: Lax

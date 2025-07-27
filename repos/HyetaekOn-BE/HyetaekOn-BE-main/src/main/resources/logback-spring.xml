@@ -1,0 +1,37 @@
+<configuration>
+    <timestamp key="BY_DATE" datePattern="yyyy-MM-dd"/>
+    <!-- 로깅 테마 -->
+    <property name="LOG_PATTERN"
+              value="[%d{yyyy-MM-dd HH:mm:ss}] [%highlight(%-5level)] [%cyan(%logger{5}.%M:%yellow(%L)]) - %msg%n"/>
+
+    <property name="LOG_PATTERN_PROD"
+              value="%d{yyyy-MM-dd HH:mm:ss} %-5level %logger{36} - %msg%n"/>
+
+    <springProfile name="dev">
+        <include resource="console-appender.xml"/>
+        <!-- 로컬 서버에서는 appender를 통해 콘솔에 출력-->
+        <root level="INFO">
+            <!-- ref="appender name(CONSOLE) 지정" -->
+            <appender-ref ref="CONSOLE"/>
+        </root>
+
+        <logger name="org.springframework" level="INFO" />
+
+        <logger name="com.hyetaekon.hyetaekon" level="DEBUG" />
+
+<!--        <logger name="org.springframework.data.mongodb" level="DEBUG" />-->
+        <logger name="org.springframework.web" level="DEBUG" />
+    </springProfile>
+
+    <!-- 로컬이 아닌 서버에서는(즉 배포 서버 set1, set2) appender를 통해 파일에 저장-->
+    <springProfile name="prod">
+        <include resource="file-info-appender.xml"/>
+        <include resource="file-error-appender.xml"/>
+
+        <root level="DEBUG">
+            <appender-ref ref="FILE-INFO"/>
+            <appender-ref ref="FILE-ERROR"/>
+        </root>
+    </springProfile>
+
+</configuration>

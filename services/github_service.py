@@ -1,4 +1,8 @@
 # services/github_service.py
+import requests
+import zipfile
+import io
+import os
 
 from parser.python_parser import parse_python_code
 from parser.javascript_parser import parse_js_code
@@ -51,3 +55,28 @@ def save_parsed_code_to_arango(repo_id: str, filename: str, language: str, parse
         "created_at": datetime.utcnow().isoformat()
     }
     return insert_document("code_analysis", document)
+
+def load_repository_files(repo_url: str):
+    """
+    GitHub 저장소를 ZIP으로 다운로드하고 파일 이름 리스트 반환
+    """
+    if repo_url.endswith("/"):
+        repo_url = repo_url[:-1]
+    repo_name = repo_url.split("/")[-1]
+    owner = repo_url.split("/")[-2]
+
+    zip_url = f"https://github.com/{owner}/{repo_name}/archive/refs/heads/main.zip"
+
+    try:
+        response = requests.get(zip_url)
+        if response.status_code != 200:
+            return {"error": f"Failed to download ZIP. Status: {response.status_code}"}
+
+        repo_path = f"./repos/{repo_name}"
+        os.makedirs(repo_path, exist_ok=True)
+
+        with zipfile.ZipFile(io.BytesIO(response.content)) as zip_file:
+            zip_file.extractall(repo_path)
+            return zip_file.namelist()
+    except Exception as e:
+        return {"error": str(e)}

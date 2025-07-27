@@ -34,3 +34,17 @@ def get_all_documents(collection_name: str):
         return list(collection.all())
     except Exception as e:
         return {"error": str(e)}
+
+def get_documents_by_prefix(collection_name: str, prefix: str):
+    try:
+        if not db.has_collection(collection_name):
+            return []
+        aql = f"""
+        FOR doc IN {collection_name}
+            FILTER STARTS_WITH(doc._key, @prefix)
+            RETURN doc
+        """
+        return list(db.aql.execute(aql, bind_vars={"prefix": prefix}))
+    except Exception as e:
+        return {"error": str(e)}
+
