@@ -1,8 +1,8 @@
-# services/github_service.py
 import requests
 import zipfile
 import io
 import os
+from datetime import datetime
 
 from parser.python_parser import parse_python_code
 from parser.javascript_parser import parse_js_code
@@ -15,12 +15,9 @@ from parser.csharp_parser import parse_csharp_code
 from parser.kotlin_parser import parse_kotlin_code
 
 from services.arangodb_service import insert_document
-from datetime import datetime
-
 
 def parse_code_by_language(language: str, code: str) -> dict:
     language = language.lower()
-
     if language == "python":
         return parse_python_code(code)
     elif language == "javascript":
@@ -42,24 +39,50 @@ def parse_code_by_language(language: str, code: str) -> dict:
     else:
         return {"error": f"Unsupported language: {language}"}
 
-
 def save_parsed_code_to_arango(repo_id: str, filename: str, language: str, parse_result: dict):
-    document = {
-        "_key": f"{repo_id}_{filename}",
+    safe_key = f"{repo_id}_{filename.replace('/', '__')}"
+    doc = {
+        "_key": safe_key,
         "repo_id": repo_id,
         "filename": filename,
         "language": language,
         "functions": parse_result.get("functions", []),
         "classes": parse_result.get("classes", []),
         "imports": parse_result.get("imports", []),
-        "created_at": datetime.utcnow().isoformat()
+        "created_at": datetime.utcnow().isoformat() + "Z"
     }
-    return insert_document("code_analysis", document)
+    return insert_document("code_analysis", doc)
+
+def get_repo_id_from_url(repo_url: str) -> str:
+    return repo_url.rstrip('/').split('/')[-1]
+
+
+def detect_language_from_filename(filename: str) -> str:
+    filename = filename.lower()
+
+    if filename.endswith(".py"):
+        return "python"
+    elif filename.endswith(".js"):
+        return "javascript"
+    elif filename.endswith(".ts"):
+        return "typescript"
+    elif filename.endswith(".java"):
+        return "java"
+    elif filename.endswith(".kt"):
+        return "kotlin"
+    elif filename.endswith(".go"):
+        return "go"
+    elif filename.endswith(".rb"):
+        return "ruby"
+    elif filename.endswith(".cpp") or filename.endswith(".cc") or filename.endswith(".cxx"):
+        return "cpp"
+    elif filename.endswith(".cs"):
+        return "csharp"
+    else:
+        return "unknown"
+
 
 def load_repository_files(repo_url: str):
-    """
-    GitHub 저장소를 ZIP으로 다운로드하고 파일 이름 리스트 반환
-    """
     if repo_url.endswith("/"):
         repo_url = repo_url[:-1]
     repo_name = repo_url.split("/")[-1]
@@ -70,7 +93,7 @@ def load_repository_files(repo_url: str):
     try:
         response = requests.get(zip_url)
         if response.status_code != 200:
-            return {"error": f"Failed to download ZIP. Status: {response.status_code}"}
+            return []
 
         repo_path = f"./repos/{repo_name}"
         os.makedirs(repo_path, exist_ok=True)
@@ -79,4 +102,15 @@ def load_repository_files(repo_url: str):
             zip_file.extractall(repo_path)
             return zip_file.namelist()
     except Exception as e:
-        return {"error": str(e)}
+        return []
+
+def read_file_from_unzipped_repo(repo_url: str, file_path: str) -> str:
+    repo_name = repo_url.rstrip('/').split('/')[-1]
+    extract_dir = f"./repos/{repo_name}/{repo_name}-main"
+    full_path = os.path.join(extract_dir, file_path)
+
+    try:
+        with open(full_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
