@@ -37,18 +37,20 @@ def parse_and_save_code(repo_id: str, payload: CodeParseRequest):
 def load_repository(req: GitRepoRequest):
     return {"files": load_repository_files(req.repo_url)}
 
-@router.get("/code-analysis/{repo_id}", summary="저장된 코드 분석 결과 조회")
+@router.get("/code-analysis/{repo_id}")
 def get_code_analysis(repo_id: str):
     return get_documents_by_prefix("code_analysis", f"{repo_id}_")
 
-@router.post("/analyze", summary="전체 저장소 자동 분석 및 마인드맵 생성")
+@router.post("/analyze")
 def analyze_repository(req: GitRepoRequest):
     repo_url = req.repo_url
-    #mode = req.mode #오류나서 지움
     repo_id = get_repo_id_from_url(repo_url)
+    mode = getattr(req, "mode", "DEV")  # 기본값 처리
 
     all_files = load_repository_files(repo_url)
-    code_files = [f for f in all_files if f.endswith((".py", ".java", ".kt"))]
+    code_files = [f for f in all_files if f.endswith((
+        ".py", ".java", ".kt", ".js", ".ts", ".go", ".cpp", ".cs", ".rb"
+    ))]
 
     mindmap_nodes = []
 
@@ -57,22 +59,10 @@ def analyze_repository(req: GitRepoRequest):
         language = detect_language_from_filename(file_path)
         parse_result = parse_code_by_language(language, code)
 
-        safe_key = f"{repo_id}_{file_path.replace('/', '__')}"
-        doc = {
-            "_key": safe_key,
-            "repo_id": repo_id,
-            "filename": file_path,
-            "language": language,
-            "functions": parse_result.get("functions", []),
-            "classes": parse_result.get("classes", []),
-            "imports": parse_result.get("imports", []),
-            "variables": parse_result.get("variables", []),
-            "created_at": datetime.utcnow().isoformat() + "Z"
-        }
-        insert_document("code_analysis", doc)
+        save_parsed_code_to_arango(repo_id, file_path, language, parse_result)
 
         for class_name in parse_result.get("classes", []):
-            children = [{"node": m} for m in parse_result.get("functions", [])]
+            children = [{"node": func_name} for func_name in parse_result.get("functions", [])]
             mindmap_nodes.append({
                 "repo_url": repo_url,
                 "mode": mode,
@@ -80,7 +70,21 @@ def analyze_repository(req: GitRepoRequest):
                 "children": children
             })
 
+        if not parse_result.get("classes") and parse_result.get("functions"):
+            for func_name in parse_result["functions"]:
+                mindmap_nodes.append({
+                    "repo_url": repo_url,
+                    "mode": mode,
+                    "node": func_name,
+                    "children": []
+                })
+
     for node in mindmap_nodes:
         insert_document("mindmap_nodes", node)
 
-    return {"repo_id": repo_id, "files_analyzed": len(code_files), "nodes": mindmap_nodes}
+    return {
+        "repo_id": repo_id,
+        "files_analyzed": len(code_files),
+        "nodes_created": len(mindmap_nodes),
+        "nodes": mindmap_nodes
+    }

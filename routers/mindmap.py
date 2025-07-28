@@ -15,9 +15,9 @@ def analyze_code(req: AnalyzeRequest):
     }
     return insert_document("mindmap_nodes", data)
 
-@router.get("/{repo_id}")
+@router.get("/{repo_id}", summary="마인드맵 노드 조회")
 def get_mindmap(repo_id: str = Path(...)):
-    return get_all_documents("mindmap_nodes")
+    return get_documents_by_prefix("mindmap_nodes", prefix=repo_id)
 
 def create_mindmap_node(repo_url: str, mode: str, parsed_result: dict):
     return insert_document("mindmap_nodes", {

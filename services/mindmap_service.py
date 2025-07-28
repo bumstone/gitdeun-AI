@@ -24,3 +24,4 @@ def get_mindmap_nodes(collection_name: str):
         return list(collection.all())
     except Exception as e:
         return {"error": str(e)}
+
