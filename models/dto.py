@@ -27,3 +27,7 @@ class CodeParseRequest(BaseModel):
 class GitRepoRequest(BaseModel):
     repo_url: str
     mode: str = "DEV"  # 기본값 제공
+
+class AnalyzeRequest(BaseModel):
+    repo_url: str
+    mode: str

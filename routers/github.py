@@ -1,7 +1,7 @@
 from datetime import datetime
 from fastapi import APIRouter
 from models.dto import CodeParseRequest, GitRepoRequest
-from services.arangodb_service import insert_document, get_documents_by_prefix
+from services.arangodb_service import insert_document, get_documents_by_key_prefix
 from services.github_service import (
     parse_code_by_language,
     save_parsed_code_to_arango,
@@ -39,7 +39,7 @@ def load_repository(req: GitRepoRequest):
 
 @router.get("/code-analysis/{repo_id}")
 def get_code_analysis(repo_id: str):
-    return get_documents_by_prefix("code_analysis", f"{repo_id}_")
+    return get_documents_by_key_prefix("code_analysis", f"{repo_id}_")
 
 @router.post("/analyze")
 def analyze_repository(req: GitRepoRequest):
@@ -59,7 +59,8 @@ def analyze_repository(req: GitRepoRequest):
         language = detect_language_from_filename(file_path)
         parse_result = parse_code_by_language(language, code)
 
-        save_parsed_code_to_arango(repo_id, file_path, language, parse_result)
+        # ✅ 수정된 부분: content 인자(code)를 추가로 전달
+        save_parsed_code_to_arango(repo_id, file_path, language, parse_result, code)
 
         for class_name in parse_result.get("classes", []):
             children = [{"node": func_name} for func_name in parse_result.get("functions", [])]

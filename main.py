@@ -6,6 +6,7 @@ app = FastAPI(
     title="Gitdeun API",
     description="FastAPI 기반 Git 저장소 분석 및 마인드맵 시스템",
     version="1.0.0",
+    debug=True,
     contact={
         "name": "Gitdeun Backend",
         "url": "https://github.com/Gitdeun/gitdeun-MM",
