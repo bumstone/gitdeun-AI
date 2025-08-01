@@ -1,4 +1,5 @@
 # routers/mindmap_router.py
+from arango import ArangoClient
 from fastapi import APIRouter, Path, HTTPException
 from models.dto import AnalyzeRequest
 from services.arangodb_service import get_documents_by_repo_url_prefix, insert_document, get_documents_by_key_prefix
@@ -75,5 +76,36 @@ def analyze_ai_code(req: AnalyzeRequest):
 
         return {"message": f"총 {saved_count}개 마인드맵 노드를 생성했습니다."}
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+def get_mindmap_graph(repo_url: str):
+    client = ArangoClient()
+    db = client.db("your_db_name", username="root", password="your_password")
+
+    aql = f"""
+    FOR v, e, p IN 1..10 OUTBOUND
+        (FOR d IN mindmap_nodes FILTER d.repo_url == @repo_url LIMIT 1 RETURN d)
+        mindmap_edges
+        OPTIONS {{ bfs: true, uniqueVertices: "global" }}
+    RETURN {{
+        node: v.label,
+        from: PARSE_IDENTIFIER(e._from).key,
+        to: PARSE_IDENTIFIER(e._to).key
+    }}
+    """
+    bind_vars = {"repo_url": repo_url}
+    cursor = db.aql.execute(aql, bind_vars=bind_vars)
+    return list(cursor)
+
+@router.get("/graph", summary="ArangoDB에서 저장된 mindmap_graph 조회")
+def get_graph(repo_url: str):
+    """
+    repo_url에 해당하는 루트 노드를 기준으로 전체 마인드맵 그래프 구조 조회
+    """
+    try:
+        from services.mindmap_service import get_mindmap_graph
+        graph_data = get_mindmap_graph(repo_url)
+        return {"repo_url": repo_url, "graph": graph_data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

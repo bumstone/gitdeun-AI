@@ -1,4 +1,6 @@
 # services/mindmap_service.py
+from arango import ArangoClient
+
 from services.arangodb_service import insert_document
 
 def save_mindmap_nodes_recursively(repo_url: str, mode: str, node: dict):
@@ -22,3 +24,24 @@ def save_mindmap_nodes_recursively(repo_url: str, mode: str, node: dict):
 
     for child in children:
         save_mindmap_nodes_recursively(repo_url, mode, child)
+
+def save_mindmap_graph(json_block: dict):
+    client = ArangoClient()
+    db = client.db("your_db_name", username="root", password="your_password")
+
+    if not db.has_graph("mindmap_graph"):
+        graph = db.create_graph("mindmap_graph")
+        if not db.has_collection("mindmap_nodes"):
+            db.create_collection("mindmap_nodes")
+        if not db.has_collection("mindmap_edges"):
+            db.create_collection("mindmap_edges", edge=True)
+        graph.create_edge_definition(
+            edge_collection="mindmap_edges",
+            from_vertex_collections=["mindmap_nodes"],
+            to_vertex_collections=["mindmap_nodes"],
+        )
+    else:
+        graph = db.graph("mindmap_graph")
+
+    nodes = db.collection("mindmap_nodes")
+    edges = db.collection("mindmap_edges")
