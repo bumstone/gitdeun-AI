@@ -6,15 +6,22 @@ db = client.db(ARANGODB_DB, username=ARANGODB_USERNAME, password=ARANGODB_PASSWO
 
 def insert_document(collection_name: str, data: dict):
     if not db.has_collection(collection_name):
-        if collection_name.endswith("_edges"):
+        if collection_name.endswith("_edges") or collection_name == "mindmap_edges":
             db.create_collection(collection_name, edge=True)
         else:
             db.create_collection(collection_name)
     collection = db.collection(collection_name)
-    return collection.insert(data, overwrite=True)
+    return collection.insert(data, overwrite=True)  # overwrite=True로 멱등 처리
 
 def document_exists(collection_name: str, key: str) -> bool:
+    if not db.has_collection(collection_name):
+        return False
     return db.collection(collection_name).has(key)
+
+def get_document_by_key(collection_name: str, key: str):
+    if not db.has_collection(collection_name):
+        return None
+    return db.collection(collection_name).get({"_key": key})
 
 def get_documents_by_repo_url_prefix(collection_name: str, prefix: str):
     aql = f"""
