@@ -1,8 +1,17 @@
-import requests
-import zipfile
+# services/github_service.py
+# 변경 핵심:
+# - 로컬 ./repos 사용 제거
+# - GitHub ZIP을 메모리로 받아서 ArangoDB(repo_files)에 파일별로 저장
+# - 코드 파일은 즉시 파싱해서 code_analysis에도 기록
+# - 이후 조회(load/read)는 모두 DB에서 수행
+
 import io
 import os
+import zipfile
 from datetime import datetime
+
+import requests
+
 from parser.python_parser import parse_python_code
 from parser.javascript_parser import parse_js_code
 from parser.java_parser import parse_java_code
@@ -12,117 +21,124 @@ from parser.typescript_parser import parse_typescript_code
 from parser.cpp_parser import parse_cpp_code
 from parser.csharp_parser import parse_csharp_code
 from parser.kotlin_parser import parse_kotlin_code
-from services.arangodb_service import insert_document
+
+from services.arangodb_service import (
+    upsert_repo, upsert_repo_file, insert_document,
+    get_repo_file_content, list_repo_files
+)
+
+# 텍스트/소스 위주로만 저장 (바이너리/대용량은 제외)
+TEXT_EXT = {
+    ".py", ".java", ".kt", ".js", ".ts", ".go", ".cpp", ".cc", ".cxx", ".cs", ".rb",
+    ".md", ".json", ".yml", ".yaml", ".xml", ".gradle", ".properties", ".txt"
+}
+
 
 def get_repo_id_from_url(repo_url: str) -> str:
     return repo_url.rstrip('/').split('/')[-1]
 
+
 def detect_language_from_filename(filename: str) -> str:
-    filename = filename.lower()
-    if filename.endswith(".py"):
-        return "python"
-    elif filename.endswith(".js"):
-        return "javascript"
-    elif filename.endswith(".ts"):
-        return "typescript"
-    elif filename.endswith(".java"):
-        return "java"
-    elif filename.endswith(".kt"):
-        return "kotlin"
-    elif filename.endswith(".go"):
-        return "go"
-    elif filename.endswith(".rb"):
-        return "ruby"
-    elif filename.endswith((".cpp", ".cc", ".cxx")):
-        return "cpp"
-    elif filename.endswith(".cs"):
-        return "csharp"
-    else:
-        return "unknown"
+    fn = filename.lower()
+    if fn.endswith(".py"): return "python"
+    if fn.endswith(".js"): return "javascript"
+    if fn.endswith(".ts"): return "typescript"
+    if fn.endswith(".java"): return "java"
+    if fn.endswith(".kt"): return "kotlin"
+    if fn.endswith(".go"): return "go"
+    if fn.endswith(".rb"): return "ruby"
+    if fn.endswith((".cpp", ".cc", ".cxx")): return "cpp"
+    if fn.endswith(".cs"): return "csharp"
+    return "unknown"
+
 
 def parse_code_by_language(language: str, code: str) -> dict:
-    language = language.lower()
-    if language == "python":
-        return parse_python_code(code)
-    elif language == "javascript":
-        return parse_js_code(code)
-    elif language == "typescript":
-        return parse_typescript_code(code)
-    elif language == "java":
-        return parse_java_code(code)
-    elif language == "go":
-        return parse_go_code(code)
-    elif language == "ruby":
-        return parse_ruby_code(code)
-    elif language == "cpp":
-        return parse_cpp_code(code)
-    elif language == "csharp":
-        return parse_csharp_code(code)
-    elif language == "kotlin":
-        return parse_kotlin_code(code)
-    else:
-        return {"functions": [], "classes": [], "imports": [], "variables": []}
+    m = (language or "").lower()
+    if m == "python": return parse_python_code(code)
+    if m == "javascript": return parse_js_code(code)
+    if m == "typescript": return parse_typescript_code(code)
+    if m == "java": return parse_java_code(code)
+    if m == "go": return parse_go_code(code)
+    if m == "ruby": return parse_ruby_code(code)
+    if m == "cpp": return parse_cpp_code(code)
+    if m == "csharp": return parse_csharp_code(code)
+    if m == "kotlin": return parse_kotlin_code(code)
+    return {"functions": [], "classes": [], "imports": [], "variables": []}
 
-def load_repository_files(repo_url: str):
-    repo_name = repo_url.rstrip("/").split("/")[-1]
+
+def fetch_and_store_repo(repo_url: str, default_branch: str = "main") -> dict:
+    """
+    GitHub ZIP을 메모리로 받아 파일 단위로 ArangoDB(repo_files)에 저장하고,
+    코드 파일은 즉시 파싱하여 code_analysis에도 기록.
+    """
+    repo_id = get_repo_id_from_url(repo_url)
+    upsert_repo(repo_id, repo_url, default_branch)
+
     owner = repo_url.rstrip("/").split("/")[-2]
-    zip_url = f"https://github.com/{owner}/{repo_name}/archive/refs/heads/main.zip"
+    name = repo_url.rstrip("/").split("/")[-1]
+    zip_url = f"https://github.com/{owner}/{name}/archive/refs/heads/{default_branch}.zip"
 
-    try:
-        response = requests.get(zip_url)
-        if response.status_code != 200:
-            print("❌ ZIP 다운로드 실패:", zip_url)
-            return []
+    r = requests.get(zip_url, timeout=60)
+    r.raise_for_status()
 
-        repo_path = f"./repos/{repo_name}"
-        os.makedirs(repo_path, exist_ok=True)
+    files_saved = 0
+    files_parsed = 0
 
-        with zipfile.ZipFile(io.BytesIO(response.content)) as zip_file:
-            zip_file.extractall(repo_path)
-            return zip_file.namelist()
-    except Exception as e:
-        print("❌ ZIP 요청 에러:", e)
-        return []
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
 
-def read_file_from_unzipped_repo(repo_url: str, file_path: str) -> str:
-    repo_name = repo_url.rstrip('/').split('/')[-1]
-    base_dir = f"./repos/{repo_name}"
+            # zip 내부 경로: "<repo>-<branch>/<path>"
+            parts = info.filename.split("/", 1)
+            if len(parts) < 2:
+                continue
+            path = parts[1]  # 레포 루트 기준 경로
 
-    subdirs = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
-    if not subdirs:
-        print("⚠️ 압축 해제된 디렉토리가 없음.")
-        return ""
+            _, ext = os.path.splitext(path)
+            if ext and ext.lower() not in TEXT_EXT:
+                # 바이너리/대용량은 스킵
+                continue
 
-    extract_subdir = os.path.join(base_dir, subdirs[0])
-    full_path = os.path.join(base_dir, file_path)
-    if not os.path.exists(full_path):
-        full_path = os.path.join(extract_subdir, file_path)
+            raw = zf.read(info.filename)
+            try:
+                content = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                # 인코딩 이슈/바이너리로 판단 시 스킵
+                continue
 
-    print("🔍 시도 중인 파일 경로:", full_path)
+            lang = detect_language_from_filename(path)
+            upsert_repo_file(repo_id, path, lang, content, size=len(raw))
+            files_saved += 1
 
-    try:
-        with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
-            return f.read()
-    except Exception as e:
-        print("❌ 파일 읽기 실패:", full_path, e)
-        return ""
+            # 파싱해서 code_analysis 기록
+            pr = parse_code_by_language(lang, content)
+            if any(pr.values()):
+                safe_key = f"{repo_id}_{path.replace('/', '__')}"
+                insert_document("code_analysis", {
+                    "_key": safe_key,
+                    "repo_id": repo_id,
+                    "filename": path,
+                    "language": lang,
+                    "functions": pr.get("functions", []),
+                    "classes": pr.get("classes", []),
+                    "imports": pr.get("imports", []),
+                    "variables": pr.get("variables", []),
+                    "content": content,
+                    "created_at": datetime.utcnow().isoformat() + "Z"
+                })
+                files_parsed += 1
 
-def save_parsed_code_to_arango(repo_id: str, filename: str, language: str, parse_result: dict, content: str):
-    if not any(parse_result.values()) and not content.strip():
-        print(f"⛔️ 내용이 없어서 저장 안함: {filename}")
-        return
+    return {"repo_id": repo_id, "files_saved": files_saved, "files_parsed": files_parsed}
 
-    safe_key = f"{repo_id}_{filename.replace('/', '__')}"
-    doc = {
-        "_key": safe_key,
-        "repo_id": repo_id,
-        "filename": filename,
-        "language": language,
-        "functions": parse_result.get("functions", []),
-        "classes": parse_result.get("classes", []),
-        "imports": parse_result.get("imports", []),
-        "variables": parse_result.get("variables", []),
-        "content": content,  # ✅ 실제 코드 텍스트 추가
-        "created_at": datetime.utcnow().isoformat() + "Z"
-    }
-    insert_document("code_analysis", doc)
+
+def load_repository_files(repo_url: str) -> list[str]:
+    """DB에서 파일 목록 조회"""
+    repo_id = get_repo_id_from_url(repo_url)
+    return [f["path"] for f in list_repo_files(repo_id)]
+
+
+def read_file_from_db(repo_url: str, file_path: str) -> str:
+    """DB에서 파일 본문 조회"""
+    repo_id = get_repo_id_from_url(repo_url)
+    return get_repo_file_content(repo_id, file_path) or ""
