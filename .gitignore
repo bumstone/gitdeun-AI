@@ -103,3 +103,4 @@ yarn-error.log*
 # Docker (있다면)
 docker-data/
 .env.docker
+.idea/
