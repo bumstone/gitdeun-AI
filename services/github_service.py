@@ -4,6 +4,8 @@
 # - GitHub ZIP을 메모리로 받아서 ArangoDB(repo_files)에 파일별로 저장
 # - 코드 파일은 즉시 파싱해서 code_analysis에도 기록
 # - 이후 조회(load/read)는 모두 DB에서 수행
+# - 중복 키 방지(seen_keys) 추가 → 같은 파일을 한 번만 처리
+# - code_analysis 저장 시 insert_document(upsert) 사용 → 409 방지
 
 import io
 import os
@@ -70,6 +72,10 @@ def fetch_and_store_repo(repo_url: str, default_branch: str = "main") -> dict:
     """
     GitHub ZIP을 메모리로 받아 파일 단위로 ArangoDB(repo_files)에 저장하고,
     코드 파일은 즉시 파싱하여 code_analysis에도 기록.
+    멱등/재실행 안전:
+      - repo_files: upsert_repo_file()
+      - code_analysis: insert_document() → 내부에서 upsert 처리
+      - ZIP 내부 중복 파일 대비: seen_keys 으로 1회만 처리
     """
     repo_id = get_repo_id_from_url(repo_url)
     upsert_repo(repo_id, repo_url, default_branch)
@@ -83,6 +89,7 @@ def fetch_and_store_repo(repo_url: str, default_branch: str = "main") -> dict:
 
     files_saved = 0
     files_parsed = 0
+    seen_keys = set()  # 🔸 중복 방지
 
     with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
         for info in zf.infolist():
@@ -94,6 +101,11 @@ def fetch_and_store_repo(repo_url: str, default_branch: str = "main") -> dict:
             if len(parts) < 2:
                 continue
             path = parts[1]  # 레포 루트 기준 경로
+
+            key = f"{repo_id}__{path.replace('/', '__')}"
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
 
             _, ext = os.path.splitext(path)
             if ext and ext.lower() not in TEXT_EXT:
@@ -111,12 +123,11 @@ def fetch_and_store_repo(repo_url: str, default_branch: str = "main") -> dict:
             upsert_repo_file(repo_id, path, lang, content, size=len(raw))
             files_saved += 1
 
-            # 파싱해서 code_analysis 기록
+            # 파싱해서 code_analysis 기록 (분석 결과가 있을 때만)
             pr = parse_code_by_language(lang, content)
             if any(pr.values()):
-                safe_key = f"{repo_id}_{path.replace('/', '__')}"
                 insert_document("code_analysis", {
-                    "_key": safe_key,
+                    "_key": key,                    # 🔸 repo_id__경로 규칙
                     "repo_id": repo_id,
                     "filename": path,
                     "language": lang,

@@ -3,19 +3,30 @@
 # - 로컬 디스크 대신 ArangoDB에 "파일 본문(content)"를 저장하는 repo_files 컬렉션 추가
 # - repos 메타 컬렉션 추가
 # - code_analysis는 그대로 유지(파싱 결과 저장)
-# - 공통 insert/get 유틸 유지
+# - 공통 insert/get 유틸을 안전한 upsert 형태로 개선(409 방지)
+# - STARTS_WITH/ENDS_WITH 미지원 환경을 위해 LIKE/CONCAT 사용
 # - 인덱스 추가로 조회 성능 보강
 
 from datetime import datetime
 from typing import List, Optional
+import logging
 
 from arango import ArangoClient
-from arango.exceptions import AQLQueryExecuteError, ArangoServerError
+from arango.exceptions import (
+    AQLQueryExecuteError,
+    ArangoServerError,
+    DocumentInsertError,
+)
 
 from config import (
     ARANGODB_HOST, ARANGODB_PORT,
     ARANGODB_USERNAME, ARANGODB_PASSWORD, ARANGODB_DB
 )
+
+# 로깅(선택)
+logging.getLogger().setLevel("INFO")
+logging.info(f"[ARANGO CONF] host={ARANGODB_HOST} port={ARANGODB_PORT} "
+             f"user={ARANGODB_USERNAME} db={ARANGODB_DB}")
 
 # 호스트/포트를 환경변수로 받아 원격/로컬 모두 대응
 client = ArangoClient(hosts=f"http://{ARANGODB_HOST}:{ARANGODB_PORT}")
@@ -48,15 +59,36 @@ def ensure_collections():
 
 
 def insert_document(collection_name: str, data: dict):
-    """공통 insert. overwrite=True로 멱등 처리"""
+    """
+    공통 insert → 안전한 upsert.
+    - 같은 _key 재삽입 시 409가 나지 않도록 선확인 + overwrite_mode="replace" 적용
+    - 동시성으로 1210이 발생하면 update로 마무리
+    """
     ensure_collections()
     if not db.has_collection(collection_name):
         if collection_name.endswith("_edges") or collection_name == "mindmap_edges":
             db.create_collection(collection_name, edge=True)
         else:
             db.create_collection(collection_name)
+
     collection = db.collection(collection_name)
-    return collection.insert(data, overwrite=True)
+
+    # _key가 있고 이미 존재하면 update 멱등 처리
+    if "_key" in data and collection.has(data["_key"]):
+        return collection.update(data)
+
+    try:
+        # 일부 버전에선 overwrite=True만으로 replace 보장이 안 됨 → overwrite_mode 명시
+        return collection.insert(
+            data,
+            overwrite=True,
+            overwrite_mode="replace",  # 핵심!
+        )
+    except DocumentInsertError as e:
+        # 드물게 경합으로 unique constraint가 다시 나면 update로 마무리
+        if "unique constraint violated" in str(e) and "_key" in data and collection.has(data["_key"]):
+            return collection.update(data)
+        raise
 
 
 def document_exists(collection_name: str, key: str) -> bool:
@@ -81,7 +113,6 @@ def get_documents_by_repo_url_prefix(collection_name: str, prefix: str):
     return list(db.aql.execute(aql, bind_vars={"prefix": prefix}))
 
 
-
 def get_documents_by_key_prefix(collection_name: str, prefix: str):
     aql = f"""
     FOR doc IN {collection_name}
@@ -90,7 +121,6 @@ def get_documents_by_key_prefix(collection_name: str, prefix: str):
       RETURN doc
     """
     return list(db.aql.execute(aql, bind_vars={"prefix": prefix}))
-
 
 
 # ---------- 레포/파일 저장 전용 유틸 ----------
