@@ -4,12 +4,14 @@
 # - repos 메타 컬렉션 추가
 # - code_analysis는 그대로 유지(파싱 결과 저장)
 # - 공통 insert/get 유틸을 안전한 upsert 형태로 개선(409 방지)
-# - STARTS_WITH/ENDS_WITH 미지원 환경을 위해 LIKE/CONCAT 사용
+# - STARTS_WITH/ENDSWITH 미지원 환경을 위해 LIKE/CONCAT 사용
 # - 인덱스 추가로 조회 성능 보강
+# - ✅ ARANGODB_URL(.env) 우선 적용: ngrok/https 등 외부 터널 URL을 그대로 사용
 
 from datetime import datetime
 from typing import List, Optional
 import logging
+import os
 
 from arango import ArangoClient
 from arango.exceptions import (
@@ -23,13 +25,19 @@ from config import (
     ARANGODB_USERNAME, ARANGODB_PASSWORD, ARANGODB_DB
 )
 
-# 로깅(선택)
-logging.getLogger().setLevel("INFO")
-logging.info(f"[ARANGO CONF] host={ARANGODB_HOST} port={ARANGODB_PORT} "
-             f"user={ARANGODB_USERNAME} db={ARANGODB_DB}")
+# -----------------------------------
+# 클라이언트 초기화 (ARANGODB_URL 우선)
+# -----------------------------------
+ARANGODB_URL = os.getenv("ARANGODB_URL")  # 예: https://xxxx.ngrok-free.app
+EFFECTIVE_HOSTS = ARANGODB_URL or f"http://{ARANGODB_HOST}:{ARANGODB_PORT}"
 
-# 호스트/포트를 환경변수로 받아 원격/로컬 모두 대응
-client = ArangoClient(hosts=f"http://{ARANGODB_HOST}:{ARANGODB_PORT}")
+logging.getLogger().setLevel("INFO")
+logging.info(
+    f"[ARANGO CONF] hosts={EFFECTIVE_HOSTS} user={ARANGODB_USERNAME} db={ARANGODB_DB}"
+)
+
+# hosts 에는 http://host:port 또는 https://도 가능
+client = ArangoClient(hosts=EFFECTIVE_HOSTS)
 db = client.db(ARANGODB_DB, username=ARANGODB_USERNAME, password=ARANGODB_PASSWORD)
 
 
