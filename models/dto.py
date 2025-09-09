@@ -36,7 +36,8 @@ class AnalyzeRequest(BaseModel):
 # --- 제안용 신규 ---
 class SuggestionRequest(BaseModel):
     repo_url: str = Field(..., description="예: https://github.com/org/repo")
-    source_node_key: str = Field(..., description="클릭된 기존 노드의 _key")
+    ##source_node_key: str = Field(..., description="클릭된 기존 노드의 _key")
+    source_node_key: Optional[str] = None
     file_path: str = Field(..., description="예: src/main/java/.../AnswerController.java")
     prompt: str = Field(..., description="개선/추천을 원하는 프롬프트")
 

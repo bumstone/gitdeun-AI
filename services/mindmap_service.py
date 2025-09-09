@@ -1,108 +1,107 @@
+# services/mindmap_service.py
 import hashlib
-from arango import ArangoClient
 from concurrent.futures import ThreadPoolExecutor
-from config import ARANGODB_USERNAME, ARANGODB_PASSWORD, ARANGODB_DB
-from services.arangodb_service import insert_document, document_exists
+from services.arangodb_service import db, insert_document, document_exists
 
-client = ArangoClient()
-db = client.db(ARANGODB_DB, username=ARANGODB_USERNAME, password=ARANGODB_PASSWORD)
+def derive_map_id(repo_url: str) -> str:
+    if not repo_url:
+        return "default"
+    return repo_url.rstrip("/").split("/")[-1]
 
-def generate_node_key(repo_url: str, mode: str, label: str) -> str:
-    """
-    repo_url + mode + label 조합으로 고유 key 생성 (재실행 시에도 동일 기능이면 동일 key)
-    """
-    raw = f"{repo_url}_{mode}_{label}".encode("utf-8")
+def generate_node_key(map_id: str, mode: str, label: str) -> str:
+    raw = f"{map_id}_{mode}_{label}".encode("utf-8")
     return hashlib.md5(raw).hexdigest()[:12]
 
-def save_mindmap_nodes_recursively(repo_url: str, mode: str, node: dict, parent_key: str = None):
+def ensure_mindmap_indexes():
+    try:
+        mn = db.collection("mindmap_nodes"); mn.add_hash_index(["map_id"])
+    except Exception: pass
+    try:
+        me = db.collection("mindmap_edges"); me.add_hash_index(["map_id"])
+    except Exception: pass
+
+def save_mindmap_nodes_recursively(
+    repo_url: str, mode: str, node: dict,
+    parent_key: str | None = None, map_id: str | None = None,
+):
+    ensure_mindmap_indexes()
+    map_id = map_id or derive_map_id(repo_url)
     node_label = node.get("node")
+    if not node_label:
+        return
+
     children = node.get("children", [])
     related_files = node.get("related_files", [])
+    node_key = generate_node_key(map_id, mode, node_label)
 
-    # 고유 node_key 생성
-    node_key = generate_node_key(repo_url, mode, node_label)
-
-    # mindmap_nodes 저장
     if not document_exists("mindmap_nodes", node_key):
         insert_document("mindmap_nodes", {
-            "_key": node_key,
-            "repo_url": repo_url,
-            "mode": mode,
-            "label": node_label,
-            "related_files": related_files or []
+            "_key": node_key, "map_id": map_id,
+            "repo_url": repo_url, "mode": mode,
+            "label": node_label, "related_files": related_files or []
         })
 
-    # mindmap_edges 저장
     if parent_key:
         edge_key = f"{parent_key}__{node_key}".replace("/", "_")
         if not document_exists("mindmap_edges", edge_key):
             insert_document("mindmap_edges", {
-                "_key": edge_key,
+                "_key": edge_key, "map_id": map_id,
                 "_from": f"mindmap_nodes/{parent_key}",
-                "_to": f"mindmap_nodes/{node_key}"
+                "_to": f"mindmap_nodes/{node_key}",
+                "relation": "contains"
             })
 
-    # 자식 노드 재귀 저장 (병렬 처리)
-    with ThreadPoolExecutor() as executor:
-        futures = []
-        for child in children:
-            futures.append(executor.submit(
-                save_mindmap_nodes_recursively,
-                repo_url, mode, child, parent_key=node_key
-            ))
-        for future in futures:
-            try:
-                future.result()
-            except Exception as e:
-                print(f"❗ Error saving child node: {e}")
+    with ThreadPoolExecutor(max_workers=4) as ex:  # 병렬 제한(경고 억제)
+        futs = [ex.submit(save_mindmap_nodes_recursively,
+                          repo_url, mode, c, node_key, map_id)
+                for c in children]
+        for f in futs:
+            f.result()
 
-def get_mindmap_graph(repo_url: str):
-    """
-    repo_url 기반으로 mindmap_edges와 mindmap_nodes를 조인해서
-    프론트에서 바로 사용 가능한 마인드맵 그래프 데이터 반환
-    """
-    aql = """
-    FOR edge IN mindmap_edges
-        LET from_node = DOCUMENT(edge._from)
-        LET to_node = DOCUMENT(edge._to)
-        FILTER from_node != null AND from_node.repo_url == @repo_url
-        RETURN {
-            from_key: PARSE_IDENTIFIER(edge._from).key,
-            from_label: from_node.label,
-            from_related_files: from_node.related_files,
-            to_key: PARSE_IDENTIFIER(edge._to).key,
-            to_label: to_node.label,
-            to_related_files: to_node.related_files
-        }
-    """
-    cursor = db.aql.execute(aql, bind_vars={"repo_url": repo_url})
-    edges = list(cursor)
+def get_mindmap_graph(map_id: str):
+    """프론트가 제안/일반 노드를 구분 렌더링할 수 있도록 타입 필드 포함"""
+    ensure_mindmap_indexes()
+    edges_raw = list(db.aql.execute("""
+      FOR e IN mindmap_edges
+        FILTER e.map_id == @map_id
+        RETURN { _from: e._from, _to: e._to, edge_type: e.edge_type }
+    """, bind_vars={"map_id": map_id}))
 
-    # 노드 목록 추출 (중복 제거)
-    nodes_dict = {}
-    for e in edges:
-        if e["from_key"] not in nodes_dict:
-            nodes_dict[e["from_key"]] = {
-                "key": e["from_key"],
-                "label": e["from_label"],
-                "related_files": e.get("from_related_files", [])
+    node_keys = set()
+    for e in edges_raw:
+        try:
+            node_keys.add(e["_from"].split("/", 1)[1])
+            node_keys.add(e["_to"].split("/", 1)[1])
+        except Exception:
+            pass
+
+    nodes_list = []
+    if node_keys:
+        nodes_list = list(db.aql.execute("""
+          FOR n IN mindmap_nodes
+            FILTER n.map_id == @map_id AND n._key IN @keys
+            RETURN {
+              key: n._key,
+              label: n.label,
+              related_files: n.related_files,
+              node_type: n.node_type,  /* ✅ 추가 */
+              mode: n.mode             /* ✅ 추가 */
             }
-        if e["to_key"] not in nodes_dict:
-            nodes_dict[e["to_key"]] = {
-                "key": e["to_key"],
-                "label": e["to_label"],
-                "related_files": e.get("to_related_files", [])
-            }
+        """, bind_vars={"map_id": map_id, "keys": list(node_keys)}))
 
-    return {
-        "nodes": list(nodes_dict.values()),
-        "edges": [
-            {
-                "from": e["from_key"],
-                "to": e["to_key"]
-            } for e in edges
-        ]
-    }
+    nodes_dict = {n["key"]: n for n in nodes_list}
+    edges = []
+    for e in edges_raw:
+        try:
+            edges.append({
+                "from": e["_from"].split("/", 1)[1],
+                "to": e["_to"].split("/", 1)[1],
+                "edge_type": e.get("edge_type")  # ✅ 추가
+            })
+        except Exception:
+            continue
+
+    return {"nodes": list(nodes_dict.values()), "edges": edges}
 
 def save_mindmap_graph():
     """
@@ -122,5 +121,5 @@ def save_mindmap_graph():
     else:
         graph = db.graph("mindmap_graph")
 
-    db.collection("mindmap_nodes")
-    db.collection("mindmap_edges")
+    # 인덱스 보장
+    ensure_mindmap_indexes()
