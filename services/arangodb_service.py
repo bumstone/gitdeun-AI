@@ -208,3 +208,39 @@ def ensure_mindmap_graph_exists():
             db.create_collection("mindmap_nodes")
         if not db.has_collection("mindmap_edges"):
             db.create_collection("mindmap_edges", edge=True)
+
+def get_repo_url_by_id(map_id: str) -> Optional[str]:
+    """repos 컬렉션에서 repo_url 조회"""
+    ensure_collections()
+    if not db.has_collection("repos"):
+        return None
+    doc = db.collection("repos").get(map_id)
+    return doc.get("repo_url") if doc else None
+
+def delete_mindmap(map_id: str, also_recommendations: bool = True) -> dict:
+    """해당 map_id의 마인드맵(노드/엣지) 제거. 선택적으로 code_recommendations도 정리."""
+    ensure_collections()
+    aql = """
+    LET e = (FOR x IN mindmap_edges FILTER x.map_id == @map_id REMOVE x IN mindmap_edges RETURN 1)
+    LET n = (FOR x IN mindmap_nodes FILTER x.map_id == @map_id REMOVE x IN mindmap_nodes RETURN 1)
+    LET r = (
+      FOR x IN code_recommendations
+        FILTER x.map_id == @map_id
+        REMOVE x IN code_recommendations
+        RETURN 1
+    )
+    RETURN {
+      edges_removed: LENGTH(e),
+      nodes_removed: LENGTH(n),
+      recs_removed: LENGTH(r)
+    }
+    """
+    # also_recommendations=false면 recs는 세지지 않도록 별도 분기
+    if not also_recommendations:
+        aql = """
+        LET e = (FOR x IN mindmap_edges FILTER x.map_id == @map_id REMOVE x IN mindmap_edges RETURN 1)
+        LET n = (FOR x IN mindmap_nodes FILTER x.map_id == @map_id REMOVE x IN mindmap_nodes RETURN 1)
+        RETURN { edges_removed: LENGTH(e), nodes_removed: LENGTH(n), recs_removed: 0 }
+        """
+    res = list(db.aql.execute(aql, bind_vars={"map_id": map_id}))
+    return res[0] if res else {"edges_removed": 0, "nodes_removed": 0, "recs_removed": 0}

@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Literal
+
 
 class GeminiLoginRequest(BaseModel):
     api_key: str
@@ -45,6 +46,10 @@ class SuggestionCreateResponse(BaseModel):
     node_key: str
     suggestion_key: str
     label: str
+    # ✅ 생성 응답에도 출처를 표기(프론트가 바로 구분 가능)
+    node_type: Literal["suggestion"] = "suggestion"
+    origin: Literal["ai", "human"] = "ai"
+    ai_generated: bool = True
 
 class SuggestionDetailResponse(BaseModel):
     suggestion_key: str
@@ -55,3 +60,7 @@ class SuggestionDetailResponse(BaseModel):
     summary: Optional[str] = None
     rationale: Optional[str] = None
     created_at: Optional[str] = None
+    # ✅ 구분 필드
+    origin: Literal["ai", "human"] = "ai"
+    ai_generated: bool = True
+    model: Optional[str] = None

@@ -37,7 +37,10 @@ def resolve_source_node_key(map_id: str, repo_url: str, file_path: str) -> str:
             "mode": "FILE",
             "label": label,
             "node_type": "file",
-            "related_files": [file_path]
+            "related_files": [file_path],
+            # ✅ 명확히 사람이 만든 파일 노드로 표기
+            "origin": "human",
+            "ai_generated": False
         })
     return file_node_key
 
@@ -67,7 +70,7 @@ def create_suggestion(map_id: str, req: SuggestionRequest):
         if src.get("map_id") != map_id:
             raise HTTPException(400, "source_node_key belongs to a different map")
 
-    # AI 제안
+    # AI 제안 생성
     ai_resp = generate_code_suggestion(
         file_path=req.file_path,
         original_code=original,
@@ -92,7 +95,7 @@ def create_suggestion(map_id: str, req: SuggestionRequest):
     sugg_node_key = generate_node_key(map_id, "SUGG", label)
     edge_key = hashlib.md5(f"{source_key}->{sugg_node_key}".encode("utf-8")).hexdigest()[:12]
 
-    # code_recommendations 저장(멱등)
+    # code_recommendations 저장(멱등) — ✅ 출처/플래그 저장
     if not document_exists("code_recommendations", suggestion_key):
         insert_document("code_recommendations", {
             "_key": suggestion_key,
@@ -106,10 +109,13 @@ def create_suggestion(map_id: str, req: SuggestionRequest):
             "rationale": ai_resp.get("rationale", ""),
             "ai_status": ai_status,
             "model": GEMINI_MODEL,
-            "created_at": datetime.utcnow().isoformat() + "Z"
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            # ✅ 구분 필드
+            "origin": "ai",
+            "ai_generated": True
         })
 
-    # 제안 노드 저장(멱등)
+    # 제안 노드 저장(멱등) — ✅ 구분 필드 저장
     if not document_exists("mindmap_nodes", sugg_node_key):
         insert_document("mindmap_nodes", {
             "_key": sugg_node_key,
@@ -119,23 +125,30 @@ def create_suggestion(map_id: str, req: SuggestionRequest):
             "label": label,
             "node_type": "suggestion",
             "related_files": [req.file_path],
-            "links": {"suggestion_key": suggestion_key}
+            "links": {"suggestion_key": suggestion_key},
+            # ✅ 구분 필드
+            "origin": "ai",
+            "ai_generated": True
         })
 
-    # 엣지 생성(멱등) — ✅ 반드시 edge_type="suggestion"
+    # 엣지 생성(멱등) — ✅ edge_type + 출처
     if not document_exists("mindmap_edges", edge_key):
         insert_document("mindmap_edges", {
             "_key": edge_key,
             "map_id": map_id,
             "_from": f"mindmap_nodes/{source_key}",
             "_to": f"mindmap_nodes/{sugg_node_key}",
-            "edge_type": "suggestion"
+            "edge_type": "suggestion",
+            "origin": "ai"
         })
 
     return SuggestionCreateResponse(
         node_key=sugg_node_key,
         suggestion_key=suggestion_key,
-        label=label
+        label=label,
+        node_type="suggestion",
+        origin="ai",
+        ai_generated=True
     )
 
 @router.get(
@@ -147,6 +160,11 @@ def get_suggestion(suggestion_key: str):
     doc = get_document_by_key("code_recommendations", suggestion_key)
     if not doc:
         raise HTTPException(404, "Suggestion not found")
+
+    # ✅ 과거 레코드(구분 필드 없음)도 안전하게 기본값 처리
+    origin = doc.get("origin") or ("ai" if doc.get("model") else "human")
+    ai_generated = bool(doc.get("ai_generated", origin == "ai"))
+
     return SuggestionDetailResponse(
         suggestion_key=doc["_key"],
         repo_url=doc["repo_url"],
@@ -155,5 +173,8 @@ def get_suggestion(suggestion_key: str):
         code=doc.get("code", ""),
         summary=doc.get("summary", ""),
         rationale=doc.get("rationale", ""),
-        created_at=doc.get("created_at")
+        created_at=doc.get("created_at"),
+        origin=origin,
+        ai_generated=ai_generated,
+        model=doc.get("model")
     )
