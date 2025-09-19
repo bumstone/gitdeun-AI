@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
+from datetime import datetime
 
 
 class GeminiLoginRequest(BaseModel):
@@ -7,7 +8,6 @@ class GeminiLoginRequest(BaseModel):
 
 class AnalyzeRequest(BaseModel):
     repo_url: str
-    mode: str  # DEV or CHK
 
 class RecommendRequest(BaseModel):
     repo_id: str
@@ -29,10 +29,6 @@ class CodeParseRequest(BaseModel):
 class GitRepoRequest(BaseModel):
     repo_url: str
     mode: str = "DEV"  # 기본값 제공
-
-class AnalyzeRequest(BaseModel):
-    repo_url: str
-    mode: str
 
 # --- 제안용 신규 ---
 class SuggestionRequest(BaseModel):
@@ -64,3 +60,11 @@ class SuggestionDetailResponse(BaseModel):
     origin: Literal["ai", "human"] = "ai"
     ai_generated: bool = True
     model: Optional[str] = None
+
+# --- repo 정보 조회를 위한 응답 모델 ---
+class RepoInfoResponse(BaseModel):
+    default_branch: str
+    last_commit: datetime # Python에서는 datetime으로 받고, FastAPI가 JSON으로 변환합니다.
+
+    class Config:
+        populate_by_name = True # alias를 사용하여 필드 이름을 매핑할 수 있도록 설정
