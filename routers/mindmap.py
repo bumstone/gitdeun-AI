@@ -6,11 +6,13 @@ from pydantic import BaseModel
 from models.dto import AnalyzeRequest
 from services.arangodb_service import get_documents_by_key_prefix, get_repo_file_content, db, get_repo_url_by_id, \
     delete_mindmap, get_prompt_doc, insert_prompt_doc, upsert_prompt_title, upsert_nodes_edges
+from services.gemini_service import ai_expand_graph, ai_make_title
 from services.mindmap_service import (
     save_mindmap_nodes_recursively,
     get_mindmap_graph,
     derive_map_id,
 )
+from services.suggestion_service import create_code_suggestion_node
 
 router = APIRouter()
 
@@ -267,5 +269,96 @@ def make_title(map_id: str, req: TitleRequest):
         })
         upsert_prompt_title(pid, title, summary)
         return TitleResponse(mindmap_id=map_id, prompt_id=pid, title=title, summary=summary)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class PromptApplyRequest(BaseModel):
+    prompt: str
+    mode: Optional[str] = "FEATURE"
+    target_nodes: Optional[List[str]] = None
+    related_files: Optional[List[str]] = None
+    temperature: Optional[float] = 0.4
+    idempotency_key: Optional[str] = None
+    # 코드추천 옵션
+    suggest: bool = True
+    max_suggestions: Optional[int] = 10   # 생성 상한
+    title: bool = True
+    title_max_len: Optional[int] = 48
+
+class PromptApplyResponse(BaseModel):
+    mindmap_id: str
+    prompt_id: str
+    added_node_keys: List[str]
+    suggestions_created: int
+    title: Optional[str] = None
+    summary: Optional[str] = None
+
+@router.post("/{map_id}/prompt-apply", response_model=PromptApplyResponse,
+             summary="프롬프트 확장 + 코드추천 + 제목 생성까지")
+def prompt_apply(map_id: str, req: PromptApplyRequest):
+    try:
+        # 1) 현재 그래프 로드 + 확장
+        current = get_mindmap_graph(map_id)
+        ai_graph = ai_expand_graph(
+            prompt=req.prompt,
+            mode=req.mode or "FEATURE",
+            current_graph=current,
+            target_nodes=req.target_nodes or [],
+            related_files=req.related_files or [],
+            temperature=req.temperature or 0.4
+        )
+        changed_keys = upsert_nodes_edges(map_id, ai_graph["nodes"], ai_graph["edges"], default_mode=req.mode or "FEATURE")
+
+        # 프롬프트 히스토리
+        prompt_id = insert_prompt_doc({
+            "mindmap_id": map_id,
+            "prompt": req.prompt,
+            "mode": req.mode,
+            "target_nodes": req.target_nodes,
+            "related_files": req.related_files,
+            "ai_summary": ai_graph.get("summary"),
+            "status": "SUCCEEDED",
+            "idempotency_key": req.idempotency_key
+        })
+
+        # 2) 코드추천 자동 생성 (신규/변경 노드들 기준)
+        suggestions_created = 0
+        if req.suggest:
+            # 대상 파일 경로 후보: 이번에 추가된 노드들의 meta.files / related_files
+            files_for_suggestion: List[tuple[str, str]] = []  # (source_node_key, file_path)
+            node_by_key = {n.get("key"): n for n in ai_graph.get("nodes", [])}
+            for k in (ai_graph.get("highlight_keys") or changed_keys):
+                node = node_by_key.get(k) or {}
+                rel_files = ((node.get("meta") or {}).get("files")) or []
+                if rel_files:
+                    files_for_suggestion.append((k, rel_files[0]))
+
+            limit = req.max_suggestions or 10
+            for source_key, file_path in files_for_suggestion[:limit]:
+                created = create_code_suggestion_node(
+                    map_id=map_id,
+                    repo_url=current["nodes"][0].get("repo_url") if current.get("nodes") else None,  # 없으면 프론트에서 repo_url 전달해도 OK
+                    file_path=file_path,
+                    prompt=req.prompt,
+                    source_node_key=source_key
+                )
+                if "error" not in created:
+                    suggestions_created += 1
+
+        # 3) 제목 생성
+        title_text = summary_text = None
+        if req.title:
+            graph = get_mindmap_graph(map_id)  # 확장/추천 반영된 최신 그래프
+            title_text, summary_text = ai_make_title(graph=graph, prompt=req.prompt, max_len=req.title_max_len or 48)
+            upsert_prompt_title(prompt_id, title_text, summary_text)
+
+        return PromptApplyResponse(
+            mindmap_id=map_id,
+            prompt_id=prompt_id,
+            added_node_keys=list(set(ai_graph.get("highlight_keys", changed_keys))),
+            suggestions_created=suggestions_created,
+            title=title_text,
+            summary=summary_text
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

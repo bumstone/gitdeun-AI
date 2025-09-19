@@ -2,7 +2,9 @@
 from fastapi import APIRouter, HTTPException
 from datetime import datetime
 import hashlib
-from typing import Literal, Optional
+from typing import Literal, Optional, List
+
+from pydantic import BaseModel
 
 from models.dto import SuggestionRequest, SuggestionDetailResponse, SuggestionCreateResponse
 from services.code_service import load_original_code_by_path
@@ -11,6 +13,8 @@ from services.mindmap_service import derive_map_id, generate_node_key
 from services.arangodb_service import (
     db, insert_document, document_exists, get_document_by_key
 )
+from services.suggestion_service import gather_files_by_label, create_code_suggestion_node, \
+    resolve_scope_nodes_from_prompt
 
 router = APIRouter()
 
@@ -177,4 +181,195 @@ def get_suggestion(suggestion_key: str):
         origin=origin,
         ai_generated=ai_generated,
         model=doc.get("model")
+    )
+
+class SuggestionByLabelRequest(BaseModel):
+    repo_url: str
+    label: str                     # 예: "공공서비스" 또는 "공공서비스(Public Service) 도메인 엔티티"
+    prompt: str                    # 예: "부서명 삭제해줘"
+    include_children: bool = True  # 하위 노드 파일까지 포함
+    max_files: int = 12            # 생성 상한
+    return_code: bool = False      # 응답에 코드 본문 포함 여부
+
+class SuggestionByLabelItem(BaseModel):
+    source_node_key: str
+    file_path: str
+    suggestion_key: Optional[str] = None
+    node_key: Optional[str] = None
+    status: str
+    error: Optional[str] = None
+    code: Optional[str] = None
+
+class SuggestionByLabelResponse(BaseModel):
+    map_id: str
+    label: str
+    total_target_files: int
+    created: int
+    items: List[SuggestionByLabelItem]
+
+@router.post(
+    "/{map_id}/by-label",
+    response_model=SuggestionByLabelResponse,
+    summary="라벨(및 자식) 스코프로 관련 파일들에 제안 일괄 생성"
+)
+def create_suggestions_by_label(map_id: str, req: SuggestionByLabelRequest):
+    if req.repo_url and derive_map_id(req.repo_url) != map_id:
+        raise HTTPException(400, "map_id and repo_url mismatch")
+
+    # 1) 라벨 기준 파일 수집
+    targets = gather_files_by_label(
+        map_id=map_id,
+        label_query=req.label,
+        include_children=req.include_children,
+        max_files=req.max_files
+    )
+    if not targets:
+        return SuggestionByLabelResponse(
+            map_id=map_id, label=req.label, total_target_files=0, created=0, items=[]
+        )
+
+    # 2) 각 파일에 대해 제안 생성
+    items: List[SuggestionByLabelItem] = []
+    created = 0
+    for source_node_key, file_path in targets:
+        result = create_code_suggestion_node(
+            map_id=map_id,
+            repo_url=req.repo_url,
+            file_path=file_path,               # 파일 확정
+            prompt=req.prompt,
+            source_node_key=source_node_key,  # 라벨 노드 옆에 가지 달리게
+            return_code=req.return_code
+        )
+        if "error" in result:
+            items.append(SuggestionByLabelItem(
+                source_node_key=source_node_key,
+                file_path=file_path,
+                status="skipped",
+                error=result.get("error")
+            ))
+            continue
+
+        created += 1
+        items.append(SuggestionByLabelItem(
+            source_node_key=source_node_key,
+            file_path=file_path,
+            suggestion_key=result["suggestion_key"],
+            node_key=result["node_key"],
+            status="created",
+            code=result.get("code")
+        ))
+
+    return SuggestionByLabelResponse(
+        map_id=map_id,
+        label=req.label,
+        total_target_files=len(targets),
+        created=created,
+        items=items
+    )
+
+class SuggestionAutoRequest(BaseModel):
+    repo_url: str
+    prompt: str
+    include_children: bool = True
+    max_files: int = 12
+    return_code: bool = False
+
+class AutoScopeItem(BaseModel):
+    scope_label: str
+    scope_node_key: str
+    file_path: str
+    suggestion_key: Optional[str] = None
+    node_key: Optional[str] = None
+    status: str
+    error: Optional[str] = None
+    code: Optional[str] = None
+
+class SuggestionAutoResponse(BaseModel):
+    map_id: str
+    prompt: str
+    chosen_scopes: List[str]
+    candidates: List[str]
+    total_target_files: int
+    created: int
+    items: List[AutoScopeItem]
+
+@router.post(
+    "/{map_id}/auto",
+    response_model=SuggestionAutoResponse,
+    summary="프롬프트만으로 스코프(라벨) 자동 추론 → 관련 파일들에 제안 일괄 생성"
+)
+def create_suggestions_auto(map_id: str, req: SuggestionAutoRequest):
+    if req.repo_url and derive_map_id(req.repo_url) != map_id:
+        raise HTTPException(400, "map_id and repo_url mismatch")
+
+    # 1) 프롬프트 → 스코프(라벨) 후보
+    scopes = resolve_scope_nodes_from_prompt(map_id, req.prompt, top_n=3)
+    if not scopes:
+        raise HTTPException(422, detail={"error": "scope_not_found", "message": "프롬프트에서 스코프(라벨)를 찾지 못했습니다."})
+
+    # 2) 상위 1~K 스코프에 대해 파일 수집 (여기선 1개만 사용, 필요시 확장)
+    top = scopes[0]
+    chosen_label = top["label"]
+    chosen_key = top["key"]
+    candidates = [f"{s['label']}({s['score']})" for s in scopes]
+
+    targets = gather_files_by_label(
+        map_id=map_id,
+        label_query=chosen_label,
+        include_children=req.include_children,
+        max_files=req.max_files
+    )
+    if not targets:
+        return SuggestionAutoResponse(
+            map_id=map_id,
+            prompt=req.prompt,
+            chosen_scopes=[chosen_label],
+            candidates=candidates,
+            total_target_files=0,
+            created=0,
+            items=[]
+        )
+
+    # 3) 파일마다 제안 생성 (라벨 시작 노드 옆에 가지)
+    items: List[AutoScopeItem] = []
+    created = 0
+    for source_node_key, file_path in targets:
+        # 소스 노드는 "선택 스코프의 시작 노드"로 고정해도 되고, gather_files_by_label에서 준 source_key를 그대로 사용해도 됨.
+        result = create_code_suggestion_node(
+            map_id=map_id,
+            repo_url=req.repo_url,
+            file_path=file_path,
+            prompt=req.prompt,
+            source_node_key=source_node_key,     # 라벨 노드 옆으로 붙임
+            return_code=req.return_code
+        )
+        if "error" in result:
+            items.append(AutoScopeItem(
+                scope_label=chosen_label,
+                scope_node_key=source_node_key,
+                file_path=file_path,
+                status="skipped",
+                error=result.get("error")
+            ))
+            continue
+
+        created += 1
+        items.append(AutoScopeItem(
+            scope_label=chosen_label,
+            scope_node_key=source_node_key,
+            file_path=file_path,
+            suggestion_key=result["suggestion_key"],
+            node_key=result["node_key"],
+            status="created",
+            code=result.get("code")
+        ))
+
+    return SuggestionAutoResponse(
+        map_id=map_id,
+        prompt=req.prompt,
+        chosen_scopes=[chosen_label],
+        candidates=candidates,
+        total_target_files=len(targets),
+        created=created,
+        items=items
     )
