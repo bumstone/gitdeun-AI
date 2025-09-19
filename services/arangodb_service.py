@@ -244,3 +244,157 @@ def delete_mindmap(map_id: str, also_recommendations: bool = True) -> dict:
         """
     res = list(db.aql.execute(aql, bind_vars={"map_id": map_id}))
     return res[0] if res else {"edges_removed": 0, "nodes_removed": 0, "recs_removed": 0}
+
+def ensure_collections():
+    """필요 컬렉션/인덱스 보장 (여러 번 호출해도 안전)"""
+    for name in ["repos", "repo_files", "code_analysis", "mindmap_nodes", "mindmap_edges",
+                 "code_recommendations", "mindmap_prompts"]:
+        if not db.has_collection(name):
+            if name.endswith("_edges"):
+                db.create_collection(name, edge=True)
+            else:
+                db.create_collection(name)
+
+    try:
+        rf = db.collection("repo_files")
+        rf.add_hash_index(["repo_id"])
+        rf.add_hash_index(["repo_id", "path"])
+    except Exception: pass
+
+    try:
+        ca = db.collection("code_analysis")
+        ca.add_hash_index(["repo_id"])
+        ca.add_hash_index(["filename"])
+    except Exception: pass
+
+    try:
+        mp = db.collection("mindmap_prompts")
+        mp.add_hash_index(["mindmap_id"])
+        mp.add_hash_index(["idempotency_key"])
+        mp.add_persistent_index(["created_at"])
+    except Exception: pass
+
+
+# -------------------- 프롬프트 히스토리 --------------------
+
+def insert_prompt_doc(doc: dict) -> str:
+    """프롬프트 기록을 남기고 _key를 반환"""
+    ensure_collections()
+    import hashlib, time
+    coll = db.collection("mindmap_prompts")
+    idem = (doc.get("idempotency_key") or "")[:48]
+    if idem:
+        # 같은 idempotency_key가 있으면 재사용
+        cursor = db.aql.execute("""
+          FOR p IN mindmap_prompts
+            FILTER p.idempotency_key == @k
+            LIMIT 1
+            RETURN p
+        """, bind_vars={"k": idem})
+        exist = next(iter(cursor), None)
+        if exist:
+            return exist["_key"]
+
+    raw = f"{doc.get('mindmap_id','')}:{time.time_ns()}".encode()
+    key = "p_" + hashlib.md5(raw).hexdigest()[:24]
+    to_insert = {
+        "_key": key,
+        "mindmap_id": doc.get("mindmap_id"),
+        "prompt": doc.get("prompt"),
+        "mode": doc.get("mode"),
+        "target_nodes": doc.get("target_nodes"),
+        "related_files": doc.get("related_files"),
+        "ai_summary": doc.get("ai_summary"),
+        "status": doc.get("status", "SUCCEEDED"),
+        "idempotency_key": idem or None,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    coll.insert(to_insert)
+    return key
+
+def get_prompt_doc(mindmap_id: str, prompt_id: Optional[str]) -> Optional[dict]:
+    ensure_collections()
+    coll = db.collection("mindmap_prompts")
+    if prompt_id:
+        if coll.has(prompt_id):
+            return coll.get(prompt_id)
+        return None
+    # 최신 프롬프트 1건
+    cursor = db.aql.execute("""
+      FOR p IN mindmap_prompts
+        FILTER p.mindmap_id == @mid
+        SORT DATE_TIMESTAMP(p.created_at) DESC
+        LIMIT 1
+        RETURN p
+    """, bind_vars={"mid": mindmap_id})
+    return next(iter(cursor), None)
+
+def upsert_prompt_title(prompt_id: str, title: str, summary: str):
+    ensure_collections()
+    coll = db.collection("mindmap_prompts")
+    if coll.has(prompt_id):
+        doc = coll.get(prompt_id)
+        doc["title"] = title
+        doc["ai_summary"] = summary
+        doc["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        coll.update(doc)
+
+
+# -------------------- 그래프 업서트 (확장용) --------------------
+
+def upsert_nodes_edges(map_id: str, nodes: list[dict], edges: list[dict], default_mode: str = "FEATURE") -> list[str]:
+    """
+    nodes: [{key?, label, meta?}]  key 없으면 label 기반으로 생성 추천 X → 여기선 필수로 간주
+    edges: [{from, to, type?}]
+    반환: 변경/신규 노드 키 리스트
+    """
+    ensure_collections()
+    changed: list[str] = []
+
+    ncoll = db.collection("mindmap_nodes")
+    ecoll = db.collection("mindmap_edges")
+
+    for n in nodes:
+        key = n.get("key")
+        label = n.get("label") or key
+        if not key:
+            # 키가 없다면 label을 키로 쓰되 해시화 권장 – 여기선 안전하게 해시
+            import hashlib
+            raw = f"{map_id}:{default_mode}:{label}".encode("utf-8")
+            key = hashlib.md5(raw).hexdigest()[:12]
+
+        doc = {
+            "_key": key,
+            "map_id": map_id,
+            "label": label,
+            "related_files": (n.get("meta", {}) or {}).get("files", []),
+            "mode": (n.get("meta", {}) or {}).get("mode", default_mode),
+            "node_type": (n.get("meta", {}) or {}).get("node_type")
+        }
+        if ncoll.has(key):
+            ncoll.update(doc)
+        else:
+            ncoll.insert(doc)
+        changed.append(key)
+
+    for e in edges:
+        fr = e.get("from") or e.get("from_")
+        to = e.get("to")
+        et = e.get("type", "RELATES_TO")
+        if not fr or not to:
+            continue
+        edge_key = f"{fr}__{to}__{et}".replace("/", "_")
+        doc = {
+            "_key": edge_key,
+            "map_id": map_id,
+            "_from": f"mindmap_nodes/{fr}",
+            "_to": f"mindmap_nodes/{to}",
+            "edge_type": et
+        }
+        if ecoll.has(edge_key):
+            ecoll.update(doc)
+        else:
+            ecoll.insert(doc)
+
+    return list(set(changed))

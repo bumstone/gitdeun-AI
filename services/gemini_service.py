@@ -129,3 +129,42 @@ JSON 스키마:
             "rationale": f"JSON 파싱 오류: {str(e)}",
             "gemini_result": result
         }
+
+from typing import Dict, Any, List, Tuple
+
+def ai_expand_graph(prompt: str, mode: str, current_graph: Dict, target_nodes: List[str], related_files: List[str], temperature: float) -> Dict[str, Any]:
+    """
+    현재 그래프 + 사용자 프롬프트를 결합해 노드/엣지 확장.
+    반환: {"nodes":[{key,label,meta}], "edges":[{from,to,type}], "highlight_keys":[...], "summary":"..."}
+    실제 구현에서는 Gemini 프롬프트 템플릿을 구성해 응답 JSON을 파싱하세요.
+    아래는 안전한 더미/포맷 예시.
+    """
+    # 간단한 키 생성 (실전: back-end의 generate_node_key 규칙과 합치면 더 좋음)
+    key = "feat_" + re.sub(r"[^a-z0-9]+", "_", prompt.lower())[:20]
+    new_nodes = [{
+        "key": key,
+        "label": "AI-Driven Feature",
+        "meta": {"mode": mode, "files": related_files, "node_type": "FEATURE"}
+    }]
+    # 연결 타깃이 있으면 첫 타깃과 연결, 없으면 루트 격 노드는 그대로 추가
+    edges = []
+    if target_nodes:
+        edges.append({"from": target_nodes[0], "to": key, "type": "ENHANCES"})
+    return {
+        "nodes": new_nodes,
+        "edges": edges,
+        "highlight_keys": [key],
+        "summary": "사용자 프롬프트 기반 기능 노드를 추가했습니다."
+    }
+
+def ai_make_title(graph: Dict[str, Any], prompt: str | None, max_len: int) -> Tuple[str, str]:
+    """
+    그래프의 중심/최신 변경점 + 프롬프트 의도를 1줄 제목으로 압축.
+    실제 구현에서는 Gemini로 요약 후 길이 제한을 적용하세요.
+    """
+    base = "기능 중심 마인드맵"
+    if prompt:
+        base = f"{base} — {prompt[:30]}".strip()
+    title = base if len(base) <= max_len else (base[:max_len-1] + "…")
+    summary = "현재 그래프 구조와 최근 프롬프트 의도를 종합해 핵심 기능을 요약했습니다."
+    return title, summary

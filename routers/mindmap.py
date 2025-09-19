@@ -1,11 +1,11 @@
-from typing import Optional, Literal
+from typing import Optional, Literal, List, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from models.dto import AnalyzeRequest
 from services.arangodb_service import get_documents_by_key_prefix, get_repo_file_content, db, get_repo_url_by_id, \
-    delete_mindmap
+    delete_mindmap, get_prompt_doc, insert_prompt_doc, upsert_prompt_title, upsert_nodes_edges
 from services.mindmap_service import (
     save_mindmap_nodes_recursively,
     get_mindmap_graph,
@@ -178,4 +178,94 @@ def drop_map(map_id: str, also_recommendations: bool = Query(True, description="
     res = delete_mindmap(map_id, also_recommendations=also_recommendations)
     return {"message": "deleted", "map_id": map_id, **res}
 
+class ExpandRequest(BaseModel):
+    prompt: str
+    mode: Optional[str] = "FEATURE"
+    target_nodes: Optional[List[str]] = None
+    related_files: Optional[List[str]] = None
+    temperature: Optional[float] = 0.4
+    idempotency_key: Optional[str] = None
 
+class GraphResponse(BaseModel):
+    mindmap_id: str
+    prompt_id: str
+    graph: Dict[str, List[Dict[str, Any]]]
+    ui: Dict[str, Any] = {"highlight": {"ai": []}}
+    saved: bool = True
+
+class TitleRequest(BaseModel):
+    prompt_id: Optional[str] = None
+    max_len: Optional[int] = 48
+
+class TitleResponse(BaseModel):
+    mindmap_id: str
+    prompt_id: str
+    title: str
+    summary: str
+
+@router.post("/{map_id}/expand", summary="프롬프트 기반 마인드맵 확장(저장 병합 + 하이라이트 반환)", response_model=GraphResponse)
+def expand_mindmap(map_id: str, req: ExpandRequest):
+    from services.gemini_service import ai_expand_graph
+
+    try:
+        # 현재 그래프(프론트용) 로드 (필수는 아니지만 맥락 제공 가능)
+        current = get_mindmap_graph(map_id)
+
+        # LLM 호출 → 확장 결과
+        ai_graph = ai_expand_graph(
+            prompt=req.prompt,
+            mode=req.mode or "FEATURE",
+            current_graph=current,
+            target_nodes=req.target_nodes or [],
+            related_files=req.related_files or [],
+            temperature=req.temperature or 0.4
+        )
+        # 저장(업서트) 및 변경된 노드키 수집
+        changed_keys = upsert_nodes_edges(map_id, ai_graph["nodes"], ai_graph["edges"], default_mode=req.mode or "FEATURE")
+
+        # 프롬프트 히스토리 기록
+        prompt_id = insert_prompt_doc({
+            "mindmap_id": map_id,
+            "prompt": req.prompt,
+            "mode": req.mode,
+            "target_nodes": req.target_nodes,
+            "related_files": req.related_files,
+            "ai_summary": ai_graph.get("summary"),
+            "status": "SUCCEEDED",
+            "idempotency_key": req.idempotency_key
+        })
+
+        return GraphResponse(
+            mindmap_id=map_id,
+            prompt_id=prompt_id,
+            graph={"nodes": ai_graph["nodes"], "edges": ai_graph["edges"]},
+            ui={"highlight": {"ai": ai_graph.get("highlight_keys", changed_keys)}},
+            saved=True
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{map_id}/title", summary="마인드맵 + 프롬프트 요약으로 제목 생성", response_model=TitleResponse)
+def make_title(map_id: str, req: TitleRequest):
+    from services.gemini_service import ai_make_title
+
+    try:
+        graph = get_mindmap_graph(map_id)
+        prompt_doc = get_prompt_doc(map_id, req.prompt_id)
+        title, summary = ai_make_title(
+            graph=graph,
+            prompt=(prompt_doc or {}).get("prompt"),
+            max_len=req.max_len or 48
+        )
+        pid = (prompt_doc or {}).get("_key") or insert_prompt_doc({
+            "mindmap_id": map_id,
+            "prompt": None,
+            "mode": None,
+            "ai_summary": summary,
+            "status": "SUCCEEDED"
+        })
+        upsert_prompt_title(pid, title, summary)
+        return TitleResponse(mindmap_id=map_id, prompt_id=pid, title=title, summary=summary)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
