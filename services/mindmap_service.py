@@ -83,8 +83,7 @@ def get_mindmap_graph(map_id: str):
               key: n._key,
               label: n.label,
               related_files: n.related_files,
-              node_type: n.node_type,  /* ✅ 추가 */
-              mode: n.mode             /* ✅ 추가 */
+              node_type: n.node_type
             }
         """, bind_vars={"map_id": map_id, "keys": list(node_keys)}))
 
@@ -95,7 +94,7 @@ def get_mindmap_graph(map_id: str):
             edges.append({
                 "from": e["_from"].split("/", 1)[1],
                 "to": e["_to"].split("/", 1)[1],
-                "edge_type": e.get("edge_type")  # ✅ 추가
+                "edge_type": e.get("edge_type")
             })
         except Exception:
             continue

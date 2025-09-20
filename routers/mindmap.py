@@ -93,7 +93,6 @@ def graph(map_id: str):
 
 class RefreshLatestRequest(BaseModel):
     repo_url: str                 # 최신화할 레포 URL (필수)
-    mode: str = "DEV"
     max_dirs: Optional[int] = None           # 없으면 제한 없음
     max_files_per_dir: Optional[int] = None  # 없으면 제한 없음
 
