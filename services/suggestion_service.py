@@ -16,8 +16,15 @@ from typing import List, Tuple, Dict, Optional, Literal
 from services.arangodb_service import db
 
 
+# 지원 확장자
+CODE_EXTS = (".java", ".kt", ".py", ".ts", ".js", ".go", ".rb", ".cs", ".cpp")
+
+
+# ------------------------------------------------------------
+# (A) 파일 경로/이름 보조
+# ------------------------------------------------------------
 def _extract_filename_from_prompt(prompt: str, SUPPORTED_EXT=None) -> Optional[str]:
-    # ✅ 기본값 보정: 인자를 안 주면 CODE_EXTS 사용
+    # 기본값 보정
     if SUPPORTED_EXT is None:
         SUPPORTED_EXT = CODE_EXTS
     pat = r'([A-Za-z0-9_\-\/\.]+(?:' + '|'.join(map(re.escape, SUPPORTED_EXT)) + r'))'
@@ -25,6 +32,7 @@ def _extract_filename_from_prompt(prompt: str, SUPPORTED_EXT=None) -> Optional[s
     if m:
         return m.group(1).split("/")[-1]
     return None
+
 
 def _find_paths_by_filename(repo_id: str, filename: str) -> List[str]:
     paths = list(db.aql.execute("""
@@ -35,9 +43,10 @@ def _find_paths_by_filename(repo_id: str, filename: str) -> List[str]:
     """, bind_vars={"repo_id": repo_id, "fn": filename}))
     def score(p: str) -> tuple:
         main_boost = -10 if "src/main" in p else 0
-        test_penalty = +10 if "/test/" in p else 0
+        test_penalty = +10 if "/test/" in p or "src/test" in p else 0
         return (main_boost + test_penalty, len(p))
     return sorted(set(paths), key=score)
+
 
 def _auto_choose_path(candidates: List[str]) -> Optional[str]:
     if not candidates:
@@ -53,8 +62,30 @@ def _auto_choose_path(candidates: List[str]) -> Optional[str]:
             return p
     return candidates[0]
 
-def resolve_file_path_auto(repo_url: str, prompt: str, source_node_key: Optional[str]=None) -> Tuple[Optional[str], List[str], str]:
+
+def _resolve_to_full_path(repo_id: str, name_or_path: str) -> Optional[str]:
+    if not name_or_path:
+        return None
+    if "/" in name_or_path:
+        return name_or_path
+    rows = list(db.aql.execute("""
+      FOR f IN repo_files
+        FILTER f.repo_id == @repo_id
+          AND (f.path LIKE CONCAT('%/', @fn)
+               OR f.path == @fn
+               OR f.path LIKE CONCAT('%', @fn))
+      RETURN f.path
+    """, bind_vars={"repo_id": repo_id, "fn": name_or_path}))
+    if not rows:
+        return None
+    def score(p: str):
+        return (-10 if "src/main" in p else 0) + (10 if "/test/" in p or "src/test" in p else 0), len(p)
+    return sorted(set(rows), key=score)[0]
+
+
+def resolve_file_path_auto(repo_url: str, prompt: str, source_node_key: Optional[str] = None) -> Tuple[Optional[str], List[str], str]:
     repo_id = derive_map_id(repo_url)
+    # source_node_key가 있으면 그 노드의 파일을 우선 사용
     if source_node_key:
         hit = list(db.aql.execute("""
           FOR n IN mindmap_nodes
@@ -65,7 +96,9 @@ def resolve_file_path_auto(repo_url: str, prompt: str, source_node_key: Optional
         if hit:
             files = hit[0].get("related_files") or []
             if files:
-                return files[0], files, "source_node_related_file"
+                full = _resolve_to_full_path(repo_id, files[0]) or files[0]
+                return full, files, "source_node_related_file"
+    # 프롬프트에서 파일명 추출
     filename = _extract_filename_from_prompt(prompt)
     if filename:
         paths = _find_paths_by_filename(repo_id, filename)
@@ -75,14 +108,18 @@ def resolve_file_path_auto(repo_url: str, prompt: str, source_node_key: Optional
         return chosen, paths, "prompt_filename_auto_chosen"
     return None, [], "no_filename"
 
+
+# ------------------------------------------------------------
+# (B) 단건 제안 생성(공통)
+# ------------------------------------------------------------
 def create_code_suggestion_node(
     map_id: str,
     repo_url: str,
     file_path: Optional[str],
     prompt: str,
     source_node_key: Optional[str] = None,
-    return_code: bool = False,                 # 👈 추가
-    prefer_main_when_ambiguous: bool = True,   # 👈 (옵션) 모호시 main 우선
+    return_code: bool = False,
+    prefer_main_when_ambiguous: bool = True,
 ) -> dict:
     # file_path 자동결정
     if not file_path:
@@ -164,14 +201,18 @@ def create_code_suggestion_node(
         "selected_file_path": file_path,
     }
     if return_code:
-        resp["code"] = code_text    # 👈 코드 동봉
+        resp["code"] = code_text
     return resp
 
+
+# ------------------------------------------------------------
+# (C) 라벨 자동 추론 + 파일 수집
+# ------------------------------------------------------------
 def _normalize_kor(s: str) -> str:
-    # 괄호/영문 병기 제거, 공백 정리
     s = re.sub(r"[()]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
 
 def _extract_scope_terms(prompt: str, max_k: int = 6) -> List[str]:
     # 핵심명사 위주 토큰 (한글/영문/숫자)
@@ -190,6 +231,7 @@ def _extract_scope_terms(prompt: str, max_k: int = 6) -> List[str]:
             seen.add(n)
     return out[:max_k] or toks[:max_k]
 
+
 def resolve_scope_nodes_from_prompt(map_id: str, prompt: str, top_n: int = 3) -> List[Dict]:
     """
     mindmap_nodes.label 과 prompt 키워드 유사도(단순 토큰 포함)로 스코프 노드 후보를 찾는다.
@@ -198,7 +240,6 @@ def resolve_scope_nodes_from_prompt(map_id: str, prompt: str, top_n: int = 3) ->
     terms = _extract_scope_terms(_normalize_kor(prompt))
     if not terms:
         return []
-    # 전 노드 라벨/관련파일 긁어서 점수화
     rows = list(db.aql.execute("""
       FOR n IN mindmap_nodes
         FILTER n.map_id == @map_id
@@ -212,8 +253,7 @@ def resolve_scope_nodes_from_prompt(map_id: str, prompt: str, top_n: int = 3) ->
         for t in terms:
             tl = t.lower()
             if tl in ll:
-                score += 2.0                 # 라벨 매칭 가중치
-        # 라벨에 '공공서비스'처럼 정확 키워드가 있으면 보너스
+                score += 2.0
         if any(t.lower() == ll.replace(" ", "") for t in terms):
             score += 1.0
         if score > 0:
@@ -221,7 +261,6 @@ def resolve_scope_nodes_from_prompt(map_id: str, prompt: str, top_n: int = 3) ->
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored[:top_n]
 
-CODE_EXTS = (".java",".kt",".py",".ts",".js",".go",".rb",".cs",".cpp")
 
 def gather_files_by_label(map_id: str, label_query: str, include_children: bool = True, max_files: int = 20) -> List[Tuple[str, str]]:
     """
@@ -230,7 +269,6 @@ def gather_files_by_label(map_id: str, label_query: str, include_children: bool 
     - include_children=True면 해당 노드의 하위(OUTBOUND)도 포함해 related_files 수집
     - related_files가 파일명만 있어도 repo_files에서 풀경로로 해석
     """
-    # 1) 시작 노드(라벨 LIKE)
     starts = list(db.aql.execute("""
       FOR n IN mindmap_nodes
         FILTER n.map_id == @map_id
@@ -241,11 +279,10 @@ def gather_files_by_label(map_id: str, label_query: str, include_children: bool 
     if not starts:
         return []
 
-    repo_id = map_id  # 규약: map_id == repo_id
+    repo_id = map_id
     files: List[Tuple[str, str]] = []
 
-    # 2) 자기 자신 + (선택) 자식들에서 related_files 수집
-    node_iters = []
+    node_iters: List[Tuple[dict, List[dict]]] = []
     if include_children:
         for s in starts:
             cur = db.aql.execute("""
@@ -259,18 +296,15 @@ def gather_files_by_label(map_id: str, label_query: str, include_children: bool 
 
     for s, children in node_iters:
         for n in ([s] + children):
-            for fp in (n.get("related_files") or []):
+            for fp in (n.get("files") or n.get("related_files") or []):
                 if not fp:
                     continue
-                # 코드 파일만
                 low = fp.lower()
                 if not low.endswith(CODE_EXTS):
                     continue
-                # ✅ 파일명 → 풀경로
                 full = _resolve_to_full_path(repo_id, fp) or fp
                 files.append((s["key"], full))
 
-    # 3) 중복 제거 & 상한
     seen = set()
     out: List[Tuple[str, str]] = []
     for src_key, fp in files:
@@ -283,21 +317,51 @@ def gather_files_by_label(map_id: str, label_query: str, include_children: bool 
             break
     return out
 
-def _resolve_to_full_path(repo_id: str, name_or_path: str) -> Optional[str]:
-    # 이미 경로
-    if "/" in (name_or_path or ""):
-        return name_or_path
-    rows = list(db.aql.execute("""
-      FOR f IN repo_files
-        FILTER f.repo_id == @repo_id
-          AND (f.path LIKE CONCAT('%/', @fn)
-               OR f.path == @fn
-               OR f.path LIKE CONCAT('%', @fn))
-      RETURN f.path
-    """, bind_vars={"repo_id": repo_id, "fn": name_or_path}))
-    if not rows:
-        return None
-    # src/main 우선, /test/ 패널티, 경로 짧을수록 우선
-    def score(p: str):
-        return (-10 if "src/main" in p else 0) + (10 if "/test/" in p or "src/test" in p else 0), len(p)
-    return sorted(set(rows), key=score)[0]
+
+def gather_files_by_node_key(map_id: str, start_node_key: str, include_children: bool = True, max_files: int = 20) -> List[Tuple[str, str]]:
+    """
+    반환: [(source_node_key, full_path), ...]
+    - start_node_key에서 시작해 자기 자신(+자식 선택) 노드들의 related_files를 모은다.
+    - related_files가 파일명만이어도 풀경로로 해석한다.
+    """
+    start = list(db.aql.execute("""
+      FOR n IN mindmap_nodes
+        FILTER n.map_id == @map_id AND n._key == @key
+        LIMIT 1
+        RETURN { key: n._key, files: n.related_files }
+    """, bind_vars={"map_id": map_id, "key": start_node_key}))
+    if not start:
+        return []
+
+    repo_id = map_id
+    files: List[Tuple[str, str]] = []
+    nodes = [start[0]]
+    if include_children:
+        cur = db.aql.execute("""
+          FOR v, e, p IN 1..3 OUTBOUND CONCAT('mindmap_nodes/', @start) mindmap_edges
+            FILTER e.map_id == @map_id
+            RETURN v
+        """, bind_vars={"start": start_node_key, "map_id": map_id})
+        nodes += list(cur)
+
+    for n in nodes:
+        for fp in (n.get("files") or n.get("related_files") or []):
+            if not fp:
+                continue
+            low = fp.lower()
+            if not low.endswith(CODE_EXTS):
+                continue
+            full = _resolve_to_full_path(repo_id, fp) or fp
+            files.append((start_node_key, full))
+
+    seen = set()
+    out: List[Tuple[str, str]] = []
+    for src, path in files:
+        k = (src, path)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append((src, path))
+        if len(out) >= max_files:
+            break
+    return out
