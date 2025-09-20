@@ -8,8 +8,8 @@ def derive_map_id(repo_url: str) -> str:
         return "default"
     return repo_url.rstrip("/").split("/")[-1]
 
-def generate_node_key(map_id: str, mode: str, label: str) -> str:
-    raw = f"{map_id}_{mode}_{label}".encode("utf-8")
+def generate_node_key(map_id: str, label: str) -> str:
+    raw = f"{map_id}_{label}".encode("utf-8")
     return hashlib.md5(raw).hexdigest()[:12]
 
 def ensure_mindmap_indexes():
@@ -21,7 +21,7 @@ def ensure_mindmap_indexes():
     except Exception: pass
 
 def save_mindmap_nodes_recursively(
-    repo_url: str, mode: str, node: dict,
+    repo_url: str, node: dict,
     parent_key: str | None = None, map_id: str | None = None,
 ):
     ensure_mindmap_indexes()
@@ -32,13 +32,12 @@ def save_mindmap_nodes_recursively(
 
     children = node.get("children", [])
     related_files = node.get("related_files", [])
-    node_key = generate_node_key(map_id, mode, node_label)
+    node_key = generate_node_key(map_id, node_label)
 
     if not document_exists("mindmap_nodes", node_key):
         insert_document("mindmap_nodes", {
             "_key": node_key, "map_id": map_id,
-            "repo_url": repo_url, "mode": mode,
-            "label": node_label, "related_files": related_files or []
+            "repo_url": repo_url, "label": node_label, "related_files": related_files or []
         })
 
     if parent_key:
@@ -53,7 +52,7 @@ def save_mindmap_nodes_recursively(
 
     with ThreadPoolExecutor(max_workers=4) as ex:  # 병렬 제한(경고 억제)
         futs = [ex.submit(save_mindmap_nodes_recursively,
-                          repo_url, mode, c, node_key, map_id)
+                          repo_url, c, node_key, map_id)
                 for c in children]
         for f in futs:
             f.result()
