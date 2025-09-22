@@ -4,8 +4,15 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from models.dto import AnalyzeRequest
-from services.arangodb_service import get_documents_by_key_prefix, db, \
-    delete_mindmap, get_prompt_doc, insert_prompt_doc, upsert_prompt_title, upsert_nodes_edges
+from services.arangodb_service import (
+    get_documents_by_key_prefix,
+    db,
+    delete_mindmap,
+    get_prompt_doc,
+    insert_prompt_doc,
+    upsert_prompt_title,
+    upsert_nodes_edges,
+)
 from services.gemini_service import ai_expand_graph, ai_make_title
 from services.mindmap_service import (
     save_mindmap_nodes_recursively,
@@ -16,6 +23,7 @@ from services.suggestion_service import create_code_suggestion_node
 
 router = APIRouter()
 
+
 @router.post("/{map_id}/analyze", summary="마인드맵 수동 생성 (map 스코프)")
 def analyze_code(map_id: str, req: AnalyzeRequest):
     # 데모용 트리
@@ -24,8 +32,8 @@ def analyze_code(map_id: str, req: AnalyzeRequest):
         "children": [
             {"node": "delete", "children": []},
             {"node": "suspend", "children": []},
-            {"node": "getDisplayContent", "children": []}
-        ]
+            {"node": "getDisplayContent", "children": []},
+        ],
     }
     try:
         # repo_url이 왔다면 map_id와 일치 검증(옵션)
@@ -37,7 +45,6 @@ def analyze_code(map_id: str, req: AnalyzeRequest):
         return {"message": "저장 완료", "map_id": map_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 
 @router.post("/analyze-ai", summary="Gemini로 마인드맵 생성 (빠른/간결, repo_url 기준)")
@@ -76,6 +83,7 @@ def analyze_ai_code(req: AnalyzeRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/{map_id}/graph", summary="특정 맵 그래프 반환")
 def graph(map_id: str):
     try:
@@ -84,17 +92,17 @@ def graph(map_id: str):
             "map_id": map_id,
             "count": len(data["nodes"]),
             "nodes": data["nodes"],
-            "edges": data["edges"]
+            "edges": data["edges"],
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-
 class RefreshLatestRequest(BaseModel):
-    repo_url: str                 # 최신화할 레포 URL (필수)
-    max_dirs: Optional[int] = None           # 없으면 제한 없음
+    repo_url: str  # 최신화할 레포 URL (필수)
+    max_dirs: Optional[int] = None  # 없으면 제한 없음
     max_files_per_dir: Optional[int] = None  # 없으면 제한 없음
+
 
 @router.post("/{map_id}/refresh-latest", summary="가장 최근 저장 배치만 빠르게 새로고침(짧은 응답)")
 def refresh_latest(map_id: str, req: RefreshLatestRequest):
@@ -105,24 +113,32 @@ def refresh_latest(map_id: str, req: RefreshLatestRequest):
     # 1) 최신 코드 fetch → repo_files upsert
     try:
         from services.github_service import fetch_and_store_repo
+
         _ = fetch_and_store_repo(req.repo_url)
     except Exception as e:
         raise HTTPException(500, f"fetch failed: {e}")
 
     # 2) repo_files에서 '가장 최근 저장 시각' 구하기
-    last_list = list(db.aql.execute("""
+    last_list = list(
+        db.aql.execute(
+            """
       FOR f IN repo_files
         FILTER f.repo_id == @repo_id
         SORT DATE_TIMESTAMP(f.fetched_at) DESC
         LIMIT 1
         RETURN f.fetched_at
-    """, bind_vars={"repo_id": map_id}))
+    """,
+            bind_vars={"repo_id": map_id},
+        )
+    )
     if not last_list:
         return {"message": "repo_files 비어있음 — 먼저 적재하세요.", "map_id": map_id}
     last_iso = last_list[0]
 
     # 3) 그 '가장 최근 시각'과 동일한 파일들만 선택 (같은 배치)
-    changed = list(db.aql.execute("""
+    changed = list(
+        db.aql.execute(
+            """
       FOR f IN repo_files
         FILTER f.repo_id == @repo_id
           AND f.fetched_at == @last_iso
@@ -130,10 +146,19 @@ def refresh_latest(map_id: str, req: RefreshLatestRequest):
            OR LIKE(f.path, '%.js') OR LIKE(f.path, '%.ts') OR LIKE(f.path, '%.go')
            OR LIKE(f.path, '%.cpp') OR LIKE(f.path, '%.cs') OR LIKE(f.path, '%.rb')
         RETURN { path: f.path, content: f.content }
-    """, bind_vars={"repo_id": map_id, "last_iso": last_iso}))
+    """,
+            bind_vars={"repo_id": map_id, "last_iso": last_iso},
+        )
+    )
 
     if not changed:
-        return {"message": "가장 최근 배치에서 코드 파일 변경 없음", "map_id": map_id, "batch_time": last_iso, "changed_files": 0, "dirs_analyzed": 0}
+        return {
+            "message": "가장 최근 배치에서 코드 파일 변경 없음",
+            "map_id": map_id,
+            "batch_time": last_iso,
+            "changed_files": 0,
+            "dirs_analyzed": 0,
+        }
 
     # 4) 디렉터리로 묶기 + (선택적) 제한 적용
     grouped: dict[str, list[tuple[str, str]]] = {}
@@ -154,6 +179,7 @@ def refresh_latest(map_id: str, req: RefreshLatestRequest):
 
     # 5) 디렉터리별 간결 요약 → 저장 (짧은 응답)
     from services.gemini_service import summarize_directory_code
+
     saved_dirs = 0
     for dir_name in order:
         blocks = grouped.get(dir_name, [])
@@ -170,14 +196,19 @@ def refresh_latest(map_id: str, req: RefreshLatestRequest):
         "map_id": map_id,
         "batch_time": last_iso,
         "changed_files": len(changed),
-        "dirs_analyzed": saved_dirs
+        "dirs_analyzed": saved_dirs,
     }
+
 
 # --- (B) 마인드맵 삭제 ---
 @router.delete("/{map_id}", summary="해당 맵의 mindmap_nodes/edges 삭제")
-def drop_map(map_id: str, also_recommendations: bool = Query(True, description="제안(code_recommendations)도 함께 삭제")):
+def drop_map(
+    map_id: str,
+    also_recommendations: bool = Query(True, description="제안(code_recommendations)도 함께 삭제"),
+):
     res = delete_mindmap(map_id, also_recommendations=also_recommendations)
     return {"message": "deleted", "map_id": map_id, **res}
+
 
 class ExpandRequest(BaseModel):
     prompt: str
@@ -187,6 +218,7 @@ class ExpandRequest(BaseModel):
     temperature: Optional[float] = 0.4
     idempotency_key: Optional[str] = None
 
+
 class GraphResponse(BaseModel):
     mindmap_id: str
     prompt_id: str
@@ -194,9 +226,11 @@ class GraphResponse(BaseModel):
     ui: Dict[str, Any] = {"highlight": {"ai": []}}
     saved: bool = True
 
+
 class TitleRequest(BaseModel):
     prompt_id: Optional[str] = None
     max_len: Optional[int] = 48
+
 
 class TitleResponse(BaseModel):
     mindmap_id: str
@@ -204,10 +238,13 @@ class TitleResponse(BaseModel):
     title: str
     summary: str
 
-@router.post("/{map_id}/expand", summary="프롬프트 기반 마인드맵 확장(저장 병합 + 하이라이트 반환)", response_model=GraphResponse)
-def expand_mindmap(map_id: str, req: ExpandRequest):
-    from services.gemini_service import ai_expand_graph
 
+@router.post(
+    "/{map_id}/expand",
+    summary="프롬프트 기반 마인드맵 확장(저장 병합 + 하이라이트 반환)",
+    response_model=GraphResponse,
+)
+def expand_mindmap(map_id: str, req: ExpandRequest):
     try:
         # 현재 그래프(프론트용) 로드 (필수는 아니지만 맥락 제공 가능)
         current = get_mindmap_graph(map_id)
@@ -219,57 +256,67 @@ def expand_mindmap(map_id: str, req: ExpandRequest):
             current_graph=current,
             target_nodes=req.target_nodes or [],
             related_files=req.related_files or [],
-            temperature=req.temperature or 0.4
+            temperature=req.temperature or 0.4,
         )
+
         # 저장(업서트) 및 변경된 노드키 수집
-        changed_keys = upsert_nodes_edges(map_id, ai_graph["nodes"], ai_graph["edges"], default_mode=req.mode or "FEATURE")
+        changed_keys = upsert_nodes_edges(
+            map_id, ai_graph["nodes"], ai_graph["edges"], default_mode=req.mode or "FEATURE"
+        )
 
         # 프롬프트 히스토리 기록
-        prompt_id = insert_prompt_doc({
-            "mindmap_id": map_id,
-            "prompt": req.prompt,
-            "mode": req.mode,
-            "target_nodes": req.target_nodes,
-            "related_files": req.related_files,
-            "ai_summary": ai_graph.get("summary"),
-            "status": "SUCCEEDED",
-            "idempotency_key": req.idempotency_key
-        })
+        prompt_id = insert_prompt_doc(
+            {
+                "mindmap_id": map_id,
+                "prompt": req.prompt,
+                "mode": req.mode,
+                "target_nodes": req.target_nodes,
+                "related_files": req.related_files,
+                "ai_summary": ai_graph.get("summary"),
+                "status": "SUCCEEDED",
+                "idempotency_key": req.idempotency_key,
+            }
+        )
 
         return GraphResponse(
             mindmap_id=map_id,
             prompt_id=prompt_id,
             graph={"nodes": ai_graph["nodes"], "edges": ai_graph["edges"]},
             ui={"highlight": {"ai": ai_graph.get("highlight_keys", changed_keys)}},
-            saved=True
+            saved=True,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{map_id}/title", summary="마인드맵 + 프롬프트 요약으로 제목 생성", response_model=TitleResponse)
+@router.post(
+    "/{map_id}/title",
+    summary="마인드맵 + 프롬프트 요약으로 제목 생성",
+    response_model=TitleResponse,
+)
 def make_title(map_id: str, req: TitleRequest):
-    from services.gemini_service import ai_make_title
-
     try:
         graph = get_mindmap_graph(map_id)
         prompt_doc = get_prompt_doc(map_id, req.prompt_id)
         title, summary = ai_make_title(
             graph=graph,
             prompt=(prompt_doc or {}).get("prompt"),
-            max_len=req.max_len or 48
+            max_len=req.max_len or 48,
         )
-        pid = (prompt_doc or {}).get("_key") or insert_prompt_doc({
-            "mindmap_id": map_id,
-            "prompt": None,
-            "mode": None,
-            "ai_summary": summary,
-            "status": "SUCCEEDED"
-        })
+        pid = (prompt_doc or {}).get("_key") or insert_prompt_doc(
+            {
+                "mindmap_id": map_id,
+                "prompt": None,
+                "mode": None,
+                "ai_summary": summary,
+                "status": "SUCCEEDED",
+            }
+        )
         upsert_prompt_title(pid, title, summary)
         return TitleResponse(mindmap_id=map_id, prompt_id=pid, title=title, summary=summary)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 class PromptApplyRequest(BaseModel):
     prompt: str
@@ -280,9 +327,10 @@ class PromptApplyRequest(BaseModel):
     idempotency_key: Optional[str] = None
     # 코드추천 옵션
     suggest: bool = True
-    max_suggestions: Optional[int] = 10   # 생성 상한
+    max_suggestions: Optional[int] = 10  # 생성 상한
     title: bool = True
     title_max_len: Optional[int] = 48
+
 
 class PromptApplyResponse(BaseModel):
     mindmap_id: str
@@ -292,8 +340,12 @@ class PromptApplyResponse(BaseModel):
     title: Optional[str] = None
     summary: Optional[str] = None
 
-@router.post("/{map_id}/prompt-apply", response_model=PromptApplyResponse,
-             summary="프롬프트 확장 + 코드추천 + 제목 생성까지")
+
+@router.post(
+    "/{map_id}/prompt-apply",
+    response_model=PromptApplyResponse,
+    summary="프롬프트 확장 + 코드추천 + 제목 생성까지",
+)
 def prompt_apply(map_id: str, req: PromptApplyRequest):
     try:
         # 1) 현재 그래프 로드 + 확장
@@ -304,21 +356,25 @@ def prompt_apply(map_id: str, req: PromptApplyRequest):
             current_graph=current,
             target_nodes=req.target_nodes or [],
             related_files=req.related_files or [],
-            temperature=req.temperature or 0.4
+            temperature=req.temperature or 0.4,
         )
-        changed_keys = upsert_nodes_edges(map_id, ai_graph["nodes"], ai_graph["edges"], default_mode=req.mode or "FEATURE")
+        changed_keys = upsert_nodes_edges(
+            map_id, ai_graph["nodes"], ai_graph["edges"], default_mode=req.mode or "FEATURE"
+        )
 
         # 프롬프트 히스토리
-        prompt_id = insert_prompt_doc({
-            "mindmap_id": map_id,
-            "prompt": req.prompt,
-            "mode": req.mode,
-            "target_nodes": req.target_nodes,
-            "related_files": req.related_files,
-            "ai_summary": ai_graph.get("summary"),
-            "status": "SUCCEEDED",
-            "idempotency_key": req.idempotency_key
-        })
+        prompt_id = insert_prompt_doc(
+            {
+                "mindmap_id": map_id,
+                "prompt": req.prompt,
+                "mode": req.mode,
+                "target_nodes": req.target_nodes,
+                "related_files": req.related_files,
+                "ai_summary": ai_graph.get("summary"),
+                "status": "SUCCEEDED",
+                "idempotency_key": req.idempotency_key,
+            }
+        )
 
         # 2) 코드추천 자동 생성 (신규/변경 노드들 기준)
         suggestions_created = 0
@@ -339,7 +395,7 @@ def prompt_apply(map_id: str, req: PromptApplyRequest):
                     repo_url=current["nodes"][0].get("repo_url") if current.get("nodes") else None,  # 없으면 프론트에서 repo_url 전달해도 OK
                     file_path=file_path,
                     prompt=req.prompt,
-                    source_node_key=source_key
+                    source_node_key=source_key,
                 )
                 if "error" not in created:
                     suggestions_created += 1
@@ -348,7 +404,9 @@ def prompt_apply(map_id: str, req: PromptApplyRequest):
         title_text = summary_text = None
         if req.title:
             graph = get_mindmap_graph(map_id)  # 확장/추천 반영된 최신 그래프
-            title_text, summary_text = ai_make_title(graph=graph, prompt=req.prompt, max_len=req.title_max_len or 48)
+            title_text, summary_text = ai_make_title(
+                graph=graph, prompt=req.prompt, max_len=req.title_max_len or 48
+            )
             upsert_prompt_title(prompt_id, title_text, summary_text)
 
         return PromptApplyResponse(
@@ -357,7 +415,7 @@ def prompt_apply(map_id: str, req: PromptApplyRequest):
             added_node_keys=list(set(ai_graph.get("highlight_keys", changed_keys))),
             suggestions_created=suggestions_created,
             title=title_text,
-            summary=summary_text
+            summary=summary_text,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

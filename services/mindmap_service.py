@@ -1,31 +1,45 @@
 # services/mindmap_service.py
 import hashlib
+import re
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, List, Optional
+
 from services.arangodb_service import db, insert_document, document_exists
+
 
 def derive_map_id(repo_url: str) -> str:
     if not repo_url:
         return "default"
     return repo_url.rstrip("/").split("/")[-1]
 
+
 def generate_node_key(map_id: str, label: str) -> str:
     raw = f"{map_id}_{label}".encode("utf-8")
     return hashlib.md5(raw).hexdigest()[:12]
 
+
 def ensure_mindmap_indexes():
     try:
-        mn = db.collection("mindmap_nodes"); mn.add_hash_index(["map_id"])
-    except Exception: pass
+        mn = db.collection("mindmap_nodes")
+        mn.add_hash_index(["map_id"])
+    except Exception:
+        pass
     try:
-        me = db.collection("mindmap_edges"); me.add_hash_index(["map_id"])
-    except Exception: pass
+        me = db.collection("mindmap_edges")
+        me.add_hash_index(["map_id"])
+    except Exception:
+        pass
+
 
 def save_mindmap_nodes_recursively(
-    repo_url: str, node: dict,
-    parent_key: str | None = None, map_id: str | None = None,
+    repo_url: str,
+    node: dict,
+    parent_key: str | None = None,
+    map_id: str | None = None,
 ):
     ensure_mindmap_indexes()
     map_id = map_id or derive_map_id(repo_url)
+
     node_label = node.get("node")
     if not node_label:
         return
@@ -35,36 +49,245 @@ def save_mindmap_nodes_recursively(
     node_key = generate_node_key(map_id, node_label)
 
     if not document_exists("mindmap_nodes", node_key):
-        insert_document("mindmap_nodes", {
-            "_key": node_key, "map_id": map_id,
-            "repo_url": repo_url, "label": node_label, "related_files": related_files or []
-        })
+        insert_document(
+            "mindmap_nodes",
+            {
+                "_key": node_key,
+                "map_id": map_id,
+                "repo_url": repo_url,
+                "label": node_label,
+                "related_files": related_files or [],
+            },
+        )
 
     if parent_key:
         edge_key = f"{parent_key}__{node_key}".replace("/", "_")
         if not document_exists("mindmap_edges", edge_key):
-            insert_document("mindmap_edges", {
-                "_key": edge_key, "map_id": map_id,
-                "_from": f"mindmap_nodes/{parent_key}",
-                "_to": f"mindmap_nodes/{node_key}",
-                "relation": "contains"
-            })
+            insert_document(
+                "mindmap_edges",
+                {
+                    "_key": edge_key,
+                    "map_id": map_id,
+                    "_from": f"mindmap_nodes/{parent_key}",
+                    "_to": f"mindmap_nodes/{node_key}",
+                    "relation": "contains",
+                },
+            )
 
-    with ThreadPoolExecutor(max_workers=4) as ex:  # 병렬 제한(경고 억제)
-        futs = [ex.submit(save_mindmap_nodes_recursively,
-                          repo_url, c, node_key, map_id)
-                for c in children]
+    with ThreadPoolExecutor(max_workers=4) as ex:  # 병렬 제한
+        futs = [
+            ex.submit(save_mindmap_nodes_recursively, repo_url, c, node_key, map_id)
+            for c in children
+        ]
         for f in futs:
             f.result()
 
+
+# ---------- 추가: 파일 경로 정규화/추정 유틸 ----------
+
+def _build_repo_lookup(map_id: str) -> Dict[str, Dict[str, Any]]:
+    """repo_files에서 filename -> {path, language, size, blob_sha} 맵 생성"""
+    rows = list(
+        db.aql.execute(
+            """
+      FOR rf IN repo_files
+        FILTER rf.repo_id == @repo_id AND rf.path != null
+        LET fname = rf.filename != null ? rf.filename : LAST(SPLIT(rf.path, "/"))
+        RETURN { filename: fname, path: rf.path, language: rf.language, size: rf.size, blob_sha: rf.blob_sha }
+    """,
+            bind_vars={"repo_id": map_id},
+        )
+    )
+    lookup: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        fn = r.get("filename")
+        if not fn:
+            continue
+        lookup[fn] = {
+            "path": r.get("path"),
+            "language": r.get("language"),
+            "size": r.get("size"),
+            "blob_sha": r.get("blob_sha"),
+        }
+    return lookup
+
+
+def _split_camel(s: str) -> List[str]:
+    s = re.sub(r"([a-z])([A-Z])", r"\1 \2", s)
+    parts: List[str] = []
+    for p in s.split():
+        parts.extend(re.split(r"[_\-.]+", p))
+    return [t for t in parts if t]
+
+
+def _tokens_from_filename_or_path(s: str) -> List[str]:
+    if not s:
+        return []
+    name = s.rsplit("/", 1)[-1]
+    name = re.sub(r"\.[A-Za-z0-9]+$", "", name)
+    parts = _split_camel(name)
+    return [p.lower() for p in parts if len(p) >= 2]
+
+
+def _tokens_from_label(label: str) -> List[str]:
+    cand = re.findall(r"[A-Za-z][A-Za-z0-9]+", label or "")
+    toks: List[str] = []
+    for c in cand:
+        toks.extend(_split_camel(c))
+    return [t.lower() for t in toks if len(t) >= 2]
+
+
+def _jaccard(a: List[str], b: List[str]) -> float:
+    if not a or not b:
+        return 0.0
+    sa, sb = set(a), set(b)
+    inter = len(sa & sb)
+    union = len(sa | sb)
+    return inter / union if union else 0.0
+
+
+def _load_repo_index(map_id: str) -> List[Dict[str, Any]]:
+    """라벨→파일 추정용 인덱스: repo_files에서 각 파일의 토큰 리스트 생성"""
+    rows = list(
+        db.aql.execute(
+            """
+      FOR rf IN repo_files
+        FILTER rf.repo_id == @repo_id AND rf.path != null
+        LET fname = rf.filename != null ? rf.filename : LAST(SPLIT(rf.path, "/"))
+        RETURN { filename: fname, path: rf.path, language: rf.language, size: rf.size, blob_sha: rf.blob_sha }
+    """,
+            bind_vars={"repo_id": map_id},
+        )
+    )
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        fn = r.get("filename") or ""
+        path = r.get("path") or ""
+        out.append(
+            {
+                "path": path,
+                "tokens": _tokens_from_filename_or_path(fn or path),
+                "language": r.get("language"),
+                "size": r.get("size"),
+                "blob_sha": r.get("blob_sha"),
+            }
+        )
+    return out
+
+
+def _suggest_files_from_label(
+    label: str,
+    repo_index: List[Dict[str, Any]],
+    limit: int = 2,
+    threshold: float = 0.45,
+) -> List[Dict[str, Any]]:
+    """related_files가 비어 있을 때, 라벨 토큰으로 후보 파일을 추정 (응답에만; DB 저장 X)"""
+    ltok = _tokens_from_label(label)
+    if not ltok:
+        return []
+
+    scored: List[Dict[str, Any]] = []
+    for f in repo_index:
+        score = _jaccard(ltok, f["tokens"])
+        if score >= threshold:
+            scored.append({**f, "score": score})
+
+    if not scored:
+        return []
+
+    scored.sort(key=lambda x: (-x["score"], len(x["path"])))
+    picks: List[Dict[str, Any]] = []
+    seen = set()
+    for it in scored:
+        if len(picks) >= limit:
+            break
+        p = it["path"]
+        if p in seen:
+            continue
+        seen.add(p)
+        picks.append(
+            {
+                "file_path": p,
+                "language": it.get("language"),
+                "size": it.get("size"),
+                "blob_sha": it.get("blob_sha"),
+                "suggested": True,  # 프론트에서 뱃지 처리용
+            }
+        )
+    return picks
+
+
+def _normalize_related_files(map_id: str, rel) -> List[Dict[str, Any]]:
+    """
+    - 이미 객체 배열({file_path: ...})이면 그대로
+    - 문자열 배열이면 filename 기준으로 repo_files 매핑 → {file_path, ...}
+    - 문자열이 경로 형태면 그대로 {file_path: ...}
+    - 매핑 실패는 unresolved 표시
+    """
+    if isinstance(rel, list) and rel and isinstance(rel[0], dict) and rel[0].get("file_path"):
+        return rel
+
+    if isinstance(rel, list) and (not rel or isinstance(rel[0], str)):
+        lookup = _build_repo_lookup(map_id)
+        out: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for s in rel:
+            sname = str(s or "")
+            if not sname:
+                continue
+
+            # 이미 경로 형태면 그대로 사용
+            if "/" in sname and "." in sname:
+                if sname in seen:
+                    continue
+                seen.add(sname)
+                out.append({"file_path": sname})
+                continue
+
+            # filename → repo_files lookup
+            doc = lookup.get(sname)
+            if doc and doc.get("path"):
+                fp = doc["path"]
+                if fp in seen:
+                    continue
+                seen.add(fp)
+                out.append(
+                    {
+                        "file_path": fp,
+                        "language": doc.get("language"),
+                        "size": doc.get("size"),
+                        "blob_sha": doc.get("blob_sha"),
+                    }
+                )
+            else:
+                # 마지막 폴백
+                if sname in seen:
+                    continue
+                seen.add(sname)
+                out.append({"file_path": sname, "unresolved": True})
+        return out
+
+    return []
+
+
+# ---------- 조회 ----------
+
 def get_mindmap_graph(map_id: str):
-    """프론트가 제안/일반 노드를 구분 렌더링할 수 있도록 타입 필드 포함"""
+    """프론트용 그래프: related_files를 항상 file_path 객체 배열로 반환.
+    비어 있으면 라벨 기반 추정도 함께 제공(응답에만).
+    """
     ensure_mindmap_indexes()
-    edges_raw = list(db.aql.execute("""
+
+    edges_raw = list(
+        db.aql.execute(
+            """
       FOR e IN mindmap_edges
         FILTER e.map_id == @map_id
         RETURN { _from: e._from, _to: e._to, edge_type: e.edge_type }
-    """, bind_vars={"map_id": map_id}))
+    """,
+            bind_vars={"map_id": map_id},
+        )
+    )
 
     node_keys = set()
     for e in edges_raw:
@@ -74,32 +297,52 @@ def get_mindmap_graph(map_id: str):
         except Exception:
             pass
 
-    nodes_list = []
+    nodes_list: List[Dict[str, Any]] = []
     if node_keys:
-        nodes_list = list(db.aql.execute("""
+        nodes_list = list(
+            db.aql.execute(
+                """
           FOR n IN mindmap_nodes
             FILTER n.map_id == @map_id AND n._key IN @keys
             RETURN {
               key: n._key,
               label: n.label,
               related_files: n.related_files,
-              node_type: n.node_type
+              node_type: n.node_type,
+              repo_url: n.repo_url
             }
-        """, bind_vars={"map_id": map_id, "keys": list(node_keys)}))
+        """,
+                bind_vars={"map_id": map_id, "keys": list(node_keys)},
+            )
+        )
+
+        # 1) 문자열/경로 → file_path 객체로 정규화
+        for n in nodes_list:
+            n["related_files"] = _normalize_related_files(map_id, n.get("related_files"))
+
+        # 2) 여전히 비어 있으면 라벨 기반 추정(응답에만)
+        repo_index = _load_repo_index(map_id)
+        for n in nodes_list:
+            if not n.get("related_files"):
+                n["related_files"] = _suggest_files_from_label(n.get("label") or "", repo_index, limit=2, threshold=0.45)
 
     nodes_dict = {n["key"]: n for n in nodes_list}
+
     edges = []
     for e in edges_raw:
         try:
-            edges.append({
-                "from": e["_from"].split("/", 1)[1],
-                "to": e["_to"].split("/", 1)[1],
-                "edge_type": e.get("edge_type")
-            })
+            edges.append(
+                {
+                    "from": e["_from"].split("/", 1)[1],
+                    "to": e["_to"].split("/", 1)[1],
+                    "edge_type": e.get("edge_type"),
+                }
+            )
         except Exception:
             continue
 
     return {"nodes": list(nodes_dict.values()), "edges": edges}
+
 
 def save_mindmap_graph():
     """
@@ -114,10 +357,9 @@ def save_mindmap_graph():
         graph.create_edge_definition(
             edge_collection="mindmap_edges",
             from_vertex_collections=["mindmap_nodes"],
-            to_vertex_collections=["mindmap_nodes"]
+            to_vertex_collections=["mindmap_nodes"],
         )
     else:
         graph = db.graph("mindmap_graph")
 
-    # 인덱스 보장
     ensure_mindmap_indexes()
