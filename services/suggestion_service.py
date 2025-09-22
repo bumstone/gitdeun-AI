@@ -12,7 +12,7 @@ from services.arangodb_service import (
     insert_document,
     document_exists,
 )
-from typing import List, Tuple, Dict, Optional, Literal
+from typing import List, Tuple, Dict, Optional, Literal, Any
 from services.arangodb_service import db
 
 
@@ -261,107 +261,173 @@ def resolve_scope_nodes_from_prompt(map_id: str, prompt: str, top_n: int = 3) ->
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored[:top_n]
 
+def _hash12(s: str) -> str:
+    return hashlib.md5(s.encode("utf-8")).hexdigest()[:12]
 
-def gather_files_by_label(map_id: str, label_query: str, include_children: bool = True, max_files: int = 20) -> List[Tuple[str, str]]:
+
+def _to_file_path(rf: Any) -> Optional[str]:
     """
-    반환: [(source_node_key, full_path), ...]
-    - label_query: 부분일치(LIKE)로 라벨 매칭
-    - include_children=True면 해당 노드의 하위(OUTBOUND)도 포함해 related_files 수집
-    - related_files가 파일명만 있어도 repo_files에서 풀경로로 해석
+    related_files 원소에서 파일 경로만 추출:
+      - "src/..../A.java" 같은 문자열
+      - {"file_path": "..."} 같은 객체
+      - {"path": "..."} / {"filename": "..."} 폴백
     """
-    starts = list(db.aql.execute("""
-      FOR n IN mindmap_nodes
-        FILTER n.map_id == @map_id
-          AND n.label LIKE CONCAT('%', @q, '%')
-        RETURN { key: n._key, files: n.related_files }
-    """, bind_vars={"map_id": map_id, "q": label_query}))
+    if isinstance(rf, str):
+        return rf
+    if isinstance(rf, dict):
+        return rf.get("file_path") or rf.get("path") or rf.get("filename")
+    return None
 
-    if not starts:
-        return []
 
-    repo_id = map_id
-    files: List[Tuple[str, str]] = []
+def _paths_from_related(related_files: Any) -> List[str]:
+    out: List[str] = []
+    if isinstance(related_files, list):
+        for rf in related_files:
+            fp = _to_file_path(rf)
+            if fp:
+                out.append(fp)
+    return out
 
-    node_iters: List[Tuple[dict, List[dict]]] = []
-    if include_children:
-        for s in starts:
-            cur = db.aql.execute("""
-              FOR v, e, p IN 1..3 OUTBOUND CONCAT('mindmap_nodes/', @start) mindmap_edges
-                FILTER e.map_id == @map_id
-                RETURN v
-            """, bind_vars={"start": s["key"], "map_id": map_id})
-            node_iters.append((s, list(cur)))
-    else:
-        node_iters = [(s, []) for s in starts]
+def gather_files_by_node_key(
+    map_id: str,
+    start_node_key: str,
+    include_children: bool = True,
+    max_files: int = 12,
+) -> List[Tuple[str, str]]:
+    """
+    start_node_key에서 시작해 (옵션)자식들을 따라 내려가며
+    각 노드의 related_files에서 파일 경로를 추출해 (source_node_key, file_path) 리스트로 반환.
+    - related_files가 ["a.java", ...] 또는 [{"file_path": "a.java"}, ...] 모두 지원
+    - 중복 파일은 소문자 비교로 제거
+    """
+    depth = "0..3" if include_children else "0..0"
+    rows = list(
+        db.aql.execute(
+            f"""
+            FOR v IN {depth} OUTBOUND @start_id mindmap_edges
+              FILTER v.map_id == @map_id
+              RETURN {{ key: v._key, related_files: v.related_files }}
+            """,
+            bind_vars={"start_id": f"mindmap_nodes/{start_node_key}", "map_id": map_id},
+        )
+    )
 
-    for s, children in node_iters:
-        for n in ([s] + children):
-            for fp in (n.get("files") or n.get("related_files") or []):
-                if not fp:
-                    continue
-                low = fp.lower()
-                if not low.endswith(CODE_EXTS):
-                    continue
-                full = _resolve_to_full_path(repo_id, fp) or fp
-                files.append((s["key"], full))
-
-    seen = set()
     out: List[Tuple[str, str]] = []
-    for src_key, fp in files:
-        k = (src_key, fp)
-        if k in seen:
-            continue
-        seen.add(k)
-        out.append((src_key, fp))
-        if len(out) >= max_files:
-            break
+    seen: set[str] = set()
+
+    for r in rows:
+        key = r.get("key")
+        for fp in _paths_from_related(r.get("related_files")):
+            low = fp.lower()
+            if low in seen:
+                continue
+            seen.add(low)
+            out.append((key, fp))
+            if len(out) >= (max_files or 12):
+                return out
+
     return out
 
 
-def gather_files_by_node_key(map_id: str, start_node_key: str, include_children: bool = True, max_files: int = 20) -> List[Tuple[str, str]]:
+def gather_files_by_label(
+    map_id: str,
+    label_query: str,
+    include_children: bool = True,
+    max_files: int = 12,
+) -> List[Tuple[str, str]]:
     """
-    반환: [(source_node_key, full_path), ...]
-    - start_node_key에서 시작해 자기 자신(+자식 선택) 노드들의 related_files를 모은다.
-    - related_files가 파일명만이어도 풀경로로 해석한다.
+    라벨 포함 검색으로 시작 노드를 고르고, 그 노드(들)에서 파일을 수집.
+    여러 노드가 매치되면 첫 노드 기준으로만 진행(기존 UX 유지).
     """
-    start = list(db.aql.execute("""
-      FOR n IN mindmap_nodes
-        FILTER n.map_id == @map_id AND n._key == @key
-        LIMIT 1
-        RETURN { key: n._key, files: n.related_files }
-    """, bind_vars={"map_id": map_id, "key": start_node_key}))
+    # 라벨 매치되는 시작 노드 하나 선택
+    start = list(
+        db.aql.execute(
+            """
+            FOR n IN mindmap_nodes
+              FILTER n.map_id == @map_id
+              FILTER CONTAINS(n.label, @q)
+              LIMIT 1
+              RETURN n._key
+            """,
+            bind_vars={"map_id": map_id, "q": label_query},
+        )
+    )
     if not start:
         return []
 
-    repo_id = map_id
-    files: List[Tuple[str, str]] = []
-    nodes = [start[0]]
-    if include_children:
-        cur = db.aql.execute("""
-          FOR v, e, p IN 1..3 OUTBOUND CONCAT('mindmap_nodes/', @start) mindmap_edges
-            FILTER e.map_id == @map_id
-            RETURN v
-        """, bind_vars={"start": start_node_key, "map_id": map_id})
-        nodes += list(cur)
+    return gather_files_by_node_key(
+        map_id=map_id,
+        start_node_key=start[0],
+        include_children=include_children,
+        max_files=max_files,
+    )
 
-    for n in nodes:
-        for fp in (n.get("files") or n.get("related_files") or []):
-            if not fp:
-                continue
-            low = fp.lower()
-            if not low.endswith(CODE_EXTS):
-                continue
-            full = _resolve_to_full_path(repo_id, fp) or fp
-            files.append((start_node_key, full))
+def upsert_code_suggestion_aggregate(
+    *,
+    map_id: str,
+    parent_key: str,
+    repo_url: Optional[str],
+    items: List[Dict[str, Any]],     # 각 item: file_path, suggestion_key, (opt) code, status, error...
+    label: str = "코드 추천",
+    idempotency_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    대표 1개 노드(AGGREGATED_SUGGESTIONS)에 related_files[]로 묶어 저장.
+    같은 suggestion_key(우선) 또는 file_path 기준으로 병합.
+    """
+    stable_label = f"SUGG_AGG::{parent_key}"
+    node_key = generate_node_key(map_id, stable_label)
+    now = datetime.utcnow().isoformat() + "Z"
 
-    seen = set()
-    out: List[Tuple[str, str]] = []
-    for src, path in files:
-        k = (src, path)
-        if k in seen:
-            continue
-        seen.add(k)
-        out.append((src, path))
-        if len(out) >= max_files:
-            break
-    return out
+    if not document_exists("mindmap_nodes", node_key):
+        insert_document(
+            "mindmap_nodes",
+            {
+                "_key": node_key,
+                "map_id": map_id,
+                "repo_url": repo_url,
+                "label": f"{label} ({len(items)})",
+                "node_type": "AGGREGATED_SUGGESTIONS",
+                "related_files": items,
+                "meta": {"idempotency_key": idempotency_key, "count": len(items), "created_at": now},
+            },
+        )
+    else:
+        col = db.collection("mindmap_nodes")
+        doc = col.get(node_key) or {}
+        existing = doc.get("related_files", []) or []
+        by_key: Dict[str, Dict[str, Any]] = {}
+
+        def _k(it: Dict[str, Any]) -> str:
+            return (it.get("suggestion_key") or it.get("file_path") or _hash12(str(it)))
+
+        for it in existing:
+            by_key[_k(it)] = it
+        for it in items:
+            by_key[_k(it)] = it  # 신규/갱신
+
+        merged = list(by_key.values())
+        base_label = (doc.get("label") or label).split("(")[0].strip()
+        col.update(
+            {
+                "_key": node_key,
+                "label": f"{base_label} ({len(merged)})",
+                "related_files": merged,
+                "meta": {**(doc.get("meta") or {}), "count": len(merged), "updated_at": now},
+            }
+        )
+
+    edge_key = f"{parent_key}__{node_key}".replace("/", "_")
+    if not document_exists("mindmap_edges", edge_key):
+        insert_document(
+            "mindmap_edges",
+            {
+                "_key": edge_key,
+                "map_id": map_id,
+                "_from": f"mindmap_nodes/{parent_key}",
+                "_to": f"mindmap_nodes/{node_key}",
+                "edge_type": "SUGGESTION_AGG",
+            },
+        )
+    return {"node_key": node_key, "count": len(items)}
+

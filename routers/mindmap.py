@@ -17,9 +17,9 @@ from services.gemini_service import ai_expand_graph, ai_make_title
 from services.mindmap_service import (
     save_mindmap_nodes_recursively,
     get_mindmap_graph,
-    derive_map_id,
+    derive_map_id, find_root_node_key,
 )
-from services.suggestion_service import create_code_suggestion_node
+from services.suggestion_service import create_code_suggestion_node, upsert_code_suggestion_aggregate
 
 router = APIRouter()
 

@@ -70,7 +70,8 @@ def save_mindmap_nodes_recursively(
                     "map_id": map_id,
                     "_from": f"mindmap_nodes/{parent_key}",
                     "_to": f"mindmap_nodes/{node_key}",
-                    "relation": "contains",
+                    # 기존 그래프 조회가 edge_type 컬럼을 읽으므로 같이 넣어두면 좋다
+                    "edge_type": "contains",
                 },
             )
 
@@ -363,3 +364,26 @@ def save_mindmap_graph():
         graph = db.graph("mindmap_graph")
 
     ensure_mindmap_indexes()
+
+
+# ---------- 🔥 추가: 루트 노드 찾기(대표 부모 선택에 사용) ----------
+
+def find_root_node_key(map_id: str) -> Optional[str]:
+    rows = list(
+        db.aql.execute(
+            """
+            FOR n IN mindmap_nodes
+              FILTER n.map_id == @map_id
+              LET incoming = LENGTH(
+                FOR e IN mindmap_edges
+                  FILTER e.map_id == @map_id AND e._to == n._id
+                  RETURN 1
+              )
+              FILTER incoming == 0
+              LIMIT 1
+              RETURN n._key
+            """,
+            bind_vars={"map_id": map_id},
+        )
+    )
+    return rows[0] if rows else None
