@@ -42,7 +42,7 @@ class SuggestionCreateResponse(BaseModel):
     node_key: str
     suggestion_key: str
     label: str
-    # ✅ 생성 응답에도 출처를 표기(프론트가 바로 구분 가능)
+    # 생성 응답에도 출처 표기(프론트가 바로 구분 가능)
     node_type: Literal["suggestion"] = "suggestion"
     origin: Literal["ai", "human"] = "ai"
     ai_generated: bool = True
@@ -56,7 +56,7 @@ class SuggestionDetailResponse(BaseModel):
     summary: Optional[str] = None
     rationale: Optional[str] = None
     created_at: Optional[str] = None
-    # ✅ 구분 필드
+    # 구분 필드
     origin: Literal["ai", "human"] = "ai"
     ai_generated: bool = True
     model: Optional[str] = None
@@ -64,7 +64,7 @@ class SuggestionDetailResponse(BaseModel):
 # --- repo 정보 조회를 위한 응답 모델 ---
 class RepoInfoResponse(BaseModel):
     default_branch: str
-    last_commit: datetime # Python에서는 datetime으로 받고, FastAPI가 JSON으로 변환합니다.
+    last_commit: datetime # Python에서는 datetime으로 받고, FastAPI가 JSON으로 변환
 
     class Config:
         populate_by_name = True # alias를 사용하여 필드 이름을 매핑할 수 있도록 설정

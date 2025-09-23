@@ -4,7 +4,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from typing import Optional, List, Tuple
 
-# ✅ 환경변수/접속정보는 services 모듈에서만 관리
+# 환경변수/접속정보는 services 모듈에서만 관리
 from services.arangodb_service import (
     db,                   # AQL 실행용 (이미 env로 초기화됨)
     get_repo_file_content,  # content만 가져오는 헬퍼

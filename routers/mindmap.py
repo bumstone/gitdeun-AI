@@ -23,28 +23,6 @@ from services.suggestion_service import create_code_suggestion_node, upsert_code
 
 router = APIRouter()
 
-
-@router.post("/{map_id}/analyze", summary="마인드맵 수동 생성 (map 스코프)")
-def analyze_code(map_id: str, req: AnalyzeRequest):
-    parsed_result = {
-        "node": "Answer",
-        "children": [
-            {"node": "delete", "children": []},
-            {"node": "suspend", "children": []},
-            {"node": "getDisplayContent", "children": []},
-        ],
-    }
-    try:
-        if req.repo_url and derive_map_id(req.repo_url) != map_id:
-            raise HTTPException(status_code=400, detail="map_id and repo_url mismatch")
-
-        # ✅ 순차 저장
-        save_mindmap_nodes_recursively(req.repo_url or map_id, parsed_result, map_id=map_id, parallel=False)
-        return {"message": "저장 완료", "map_id": map_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.post("/analyze-ai", summary="Gemini로 마인드맵 생성 (빠른/간결, repo_url 기준)")
 def analyze_ai_code(req: AnalyzeRequest):
     from services.gemini_service import summarize_directory_code
@@ -67,7 +45,7 @@ def analyze_ai_code(req: AnalyzeRequest):
             result = summarize_directory_code(dir_name, blocks)
             if "error" in result:
                 continue
-            # ✅ 순차 저장 + 명시적 map_id
+            # 순차 저장 + 명시적 map_id
             save_mindmap_nodes_recursively(req.repo_url, result, map_id=repo_id, parallel=False)
             saved_count += 1
 
@@ -174,7 +152,7 @@ def refresh_latest(map_id: str, req: RefreshLatestRequest):
         result = summarize_directory_code(dir_name, blocks)
         if "error" in result:
             continue
-        # ✅ 순차 저장
+        # 순차 저장
         save_mindmap_nodes_recursively(req.repo_url, result, map_id=map_id, parallel=False)
         saved_dirs += 1
 
@@ -186,5 +164,72 @@ def refresh_latest(map_id: str, req: RefreshLatestRequest):
         "dirs_analyzed": saved_dirs,
     }
 
+# E. 맵 삭제 (노드/엣지/추천)
+@router.delete("/{map_id}", summary="해당 맵의 mindmap_nodes/edges 삭제")
+def drop_map(
+    map_id: str,
+    also_recommendations: bool = Query(
+        True, description="제안(code_recommendations)도 함께 삭제"
+    ),
+):
+    """
+    mindmap_nodes / mindmap_edges 를 비우고,
+    also_recommendations=True 면 code_recommendations 에서 해당 map_id 문서도 제거.
+    """
+    res = delete_mindmap(map_id, also_recommendations=also_recommendations)
+    return {"message": "deleted", "map_id": map_id, **res}
 
-# 이하 expand/title/prompt-apply는 그대로 (저장 경로는 upsert_nodes_edges 사용)
+# F. 제목 생성 (그래프+프롬프트 요약 기반)
+
+class TitleRequest(BaseModel):
+    prompt_id: Optional[str] = None
+    max_len: Optional[int] = 48
+
+
+class TitleResponse(BaseModel):
+    mindmap_id: str
+    prompt_id: str
+    title: str
+    summary: str
+
+@router.post(
+    "/{map_id}/title",
+    summary="마인드맵 + 프롬프트 요약으로 제목 생성",
+    response_model=TitleResponse,
+)
+def make_title(map_id: str, req: TitleRequest):
+    """
+    - 현재 그래프와 (있다면) 프롬프트 히스토리를 바탕으로
+      간결한 제목과 요약을 생성해서 prompt_doc에 업서트.
+    """
+    try:
+        graph = get_mindmap_graph(map_id)
+        prompt_doc = get_prompt_doc(map_id, req.prompt_id)
+
+        title, summary = ai_make_title(
+            graph=graph,
+            prompt=(prompt_doc or {}).get("prompt"),
+            max_len=req.max_len or 48,
+        )
+
+        # prompt_id가 없으면 히스토리 문서를 하나 만들어 둠
+        pid = (prompt_doc or {}).get("_key") or insert_prompt_doc(
+            {
+                "mindmap_id": map_id,
+                "prompt": None,
+                "mode": None,
+                "ai_summary": summary,
+                "status": "SUCCEEDED",
+            }
+        )
+
+        upsert_prompt_title(pid, title, summary)
+
+        return TitleResponse(
+            mindmap_id=map_id,
+            prompt_id=pid,
+            title=title,
+            summary=summary,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

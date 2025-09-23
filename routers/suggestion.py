@@ -22,301 +22,6 @@ from services.suggestion_service import (
 
 router = APIRouter()
 
-
-def resolve_source_node_key(map_id: str, repo_url: str, file_path: str) -> str:
-    """file_path를 참조하는 노드가 있으면 그 키를, 없으면 파일 노드를 하나 만들어 반환"""
-    hit = list(db.aql.execute(
-        """
-        FOR n IN mindmap_nodes
-          FILTER n.map_id == @map_id
-          FILTER ANY rf IN n.related_files
-                 SATISFIES (IS_STRING(rf) AND rf == @fp) OR (IS_OBJECT(rf) AND rf.file_path == @fp)
-          END
-          LIMIT 1
-          RETURN n
-        """,
-        bind_vars={"map_id": map_id, "fp": file_path}
-    ))
-    if hit:
-        return hit[0]["_key"]
-
-    # 파일 노드 생성
-    file_name = file_path.split("/")[-1]
-    label = f"[FILE] {file_name}"
-    file_node_key = generate_node_key(map_id, label)
-    if not document_exists("mindmap_nodes", file_node_key):
-        insert_document("mindmap_nodes", {
-            "_key": file_node_key,
-            "map_id": map_id,
-            "repo_url": repo_url,
-            "mode": "FILE",
-            "label": label,
-            "node_type": "file",
-            "related_files": [file_path],
-            "origin": "human",
-            "ai_generated": False
-        })
-    return file_node_key
-
-
-# -------------------- 단일 파일: 기존 동작 유지 --------------------
-@router.post(
-    "/{map_id}",
-    response_model=SuggestionCreateResponse,
-    summary="코드 제안 노드 생성 (map 스코프, 기존 노드 옆에 분기)"
-)
-def create_suggestion(map_id: str, req: SuggestionRequest):
-    if req.repo_url and derive_map_id(req.repo_url) != map_id:
-        raise HTTPException(400, "map_id and repo_url mismatch")
-
-    original = load_original_code_by_path(req.repo_url, req.file_path)
-    if not original:
-        raise HTTPException(404, "Original code not found")
-
-    source_key: Optional[str] = req.source_node_key
-    if not source_key:
-        source_key = resolve_source_node_key(map_id, req.repo_url, req.file_path)
-    else:
-        src = get_document_by_key("mindmap_nodes", source_key)
-        if not src:
-            raise HTTPException(400, "source_node_key not found")
-        if src.get("map_id") != map_id:
-            raise HTTPException(400, "source_node_key belongs to a different map")
-
-    ai_resp = generate_code_suggestion(file_path=req.file_path, original_code=original, prompt=req.prompt)
-    ai_status: Literal["success", "failed"] = "success" if ai_resp.get("code") else "failed"
-
-    code = ai_resp.get("code", "") or ""
-    b = code.encode("utf-8")
-    if len(b) > 80_000:
-        code = b[:80_000].decode("utf-8", errors="ignore")
-
-    p8 = hashlib.md5(req.prompt.encode("utf-8")).hexdigest()[:8]
-    suggestion_key = hashlib.md5(f"{req.repo_url}_{req.file_path}_{p8}".encode("utf-8")).hexdigest()[:12]
-
-    file_name = req.file_path.split("/")[-1]
-    label = f"[AI] {file_name} 개선안 #{suggestion_key}"
-    sugg_node_key = generate_node_key(map_id, label)
-    edge_key = hashlib.md5(f"{source_key}->{sugg_node_key}".encode("utf-8")).hexdigest()[:12]
-
-    if not document_exists("code_recommendations", suggestion_key):
-        insert_document("code_recommendations", {
-            "_key": suggestion_key,
-            "map_id": map_id,
-            "repo_url": req.repo_url,
-            "file_path": req.file_path,
-            "source_node_key": source_key,
-            "prompt": req.prompt,
-            "code": code,
-            "summary": ai_resp.get("summary", ""),
-            "rationale": ai_resp.get("rationale", ""),
-            "ai_status": ai_status,
-            "model": GEMINI_MODEL,
-            "created_at": datetime.utcnow().isoformat() + "Z",
-            "origin": "ai",
-            "ai_generated": True
-        })
-
-    if not document_exists("mindmap_nodes", sugg_node_key):
-        insert_document("mindmap_nodes", {
-            "_key": sugg_node_key,
-            "map_id": map_id,
-            "repo_url": req.repo_url,
-            "mode": "SUGG",
-            "label": label,
-            "node_type": "suggestion",
-            "related_files": [req.file_path],
-            "links": {"suggestion_key": suggestion_key},
-            "origin": "ai",
-            "ai_generated": True
-        })
-
-    if not document_exists("mindmap_edges", edge_key):
-        insert_document("mindmap_edges", {
-            "_key": edge_key,
-            "map_id": map_id,
-            "_from": f"mindmap_nodes/{source_key}",
-            "_to": f"mindmap_nodes/{sugg_node_key}",
-            "edge_type": "suggestion",
-            "origin": "ai"
-        })
-
-    return SuggestionCreateResponse(
-        node_key=sugg_node_key,
-        suggestion_key=suggestion_key,
-        label=label,
-        node_type="suggestion",
-        origin="ai",
-        ai_generated=True
-    )
-
-
-@router.get(
-    "/{suggestion_key}",
-    response_model=SuggestionDetailResponse,
-    summary="제안 상세 조회"
-)
-def get_suggestion(suggestion_key: str):
-    doc = get_document_by_key("code_recommendations", suggestion_key)
-    if not doc:
-        raise HTTPException(404, "Suggestion not found")
-
-    origin = doc.get("origin") or ("ai" if doc.get("model") else "human")
-    ai_generated = bool(doc.get("ai_generated", origin == "ai"))
-
-    return SuggestionDetailResponse(
-        suggestion_key=doc["_key"],
-        repo_url=doc["repo_url"],
-        file_path=doc["file_path"],
-        prompt=doc["prompt"],
-        code=doc.get("code", ""),
-        summary=doc.get("summary", ""),
-        rationale=doc.get("rationale", ""),
-        created_at=doc.get("created_at"),
-        origin=origin,
-        ai_generated=ai_generated,
-        model=doc.get("model")
-    )
-
-
-# -------------------- by-label (집계 저장) --------------------
-class SuggestionByLabelRequest(BaseModel):
-    repo_url: str
-    label: str
-    prompt: str
-    include_children: bool = True
-    max_files: int = 12
-    return_code: bool = False
-
-
-class SuggestionByLabelItem(BaseModel):
-    source_node_key: str
-    file_path: str
-    suggestion_key: Optional[str] = None
-    node_key: Optional[str] = None
-    status: str
-    error: Optional[str] = None
-    code: Optional[str] = None
-
-
-class SuggestionByLabelResponse(BaseModel):
-    map_id: str
-    label: str
-    total_target_files: int
-    created: int
-    items: List[SuggestionByLabelItem]
-    aggregate_node_key: Optional[str] = None
-
-
-@router.post(
-    "/{map_id}/by-label",
-    response_model=SuggestionByLabelResponse,
-    summary="라벨(및 자식) 스코프로 관련 파일들에 제안 일괄 생성 (집계 저장)"
-)
-def create_suggestions_by_label(map_id: str, req: SuggestionByLabelRequest):
-    if req.repo_url and derive_map_id(req.repo_url) != map_id:
-        raise HTTPException(400, "map_id and repo_url mismatch")
-
-    targets = gather_files_by_label(
-        map_id=map_id,
-        label_query=req.label,
-        include_children=req.include_children,
-        max_files=req.max_files
-    )
-    if not targets:
-        return SuggestionByLabelResponse(
-            map_id=map_id, label=req.label, total_target_files=0, created=0, items=[]
-        )
-
-    items: List[SuggestionByLabelItem] = []
-    agg_items: List[dict] = []
-    created = 0
-
-    # 대표 부모 노드: 첫 번째 타깃의 source_node_key 사용
-    parent_key = targets[0][0]
-    p8 = hashlib.md5(req.prompt.encode("utf-8")).hexdigest()[:8]
-
-    for source_node_key, file_path in targets:
-        original = load_original_code_by_path(req.repo_url, file_path)
-        if not original:
-            items.append(SuggestionByLabelItem(
-                source_node_key=source_node_key,
-                file_path=file_path,
-                status="skipped",
-                error="Original code not found"
-            ))
-            continue
-
-        ai_resp = generate_code_suggestion(file_path=file_path, original_code=original, prompt=req.prompt)
-        code = (ai_resp.get("code") or "").strip()
-        if not code:
-            items.append(SuggestionByLabelItem(
-                source_node_key=source_node_key,
-                file_path=file_path,
-                status="skipped",
-                error=ai_resp.get("error") or "No changes detected for this file (prompt mismatch or field not found).",
-                code=None
-            ))
-            continue
-
-        # 큰 코드 제한 (선택)
-        b = code.encode("utf-8")
-        if len(b) > 80_000:
-            code = b[:80_000].decode("utf-8", errors="ignore")
-
-        suggestion_key = hashlib.md5(f"{req.repo_url}_{file_path}_{p8}".encode("utf-8")).hexdigest()[:12]
-
-        if not document_exists("code_recommendations", suggestion_key):
-            insert_document("code_recommendations", {
-                "_key": suggestion_key,
-                "map_id": map_id,
-                "repo_url": req.repo_url,
-                "file_path": file_path,
-                "source_node_key": source_node_key,
-                "prompt": req.prompt,
-                "code": code,
-                "summary": ai_resp.get("summary", ""),
-                "rationale": ai_resp.get("rationale", ""),
-                "ai_status": "success",
-                "model": GEMINI_MODEL,
-                "created_at": datetime.utcnow().isoformat() + "Z",
-                "origin": "ai",
-                "ai_generated": True
-            })
-
-        created += 1
-        items.append(SuggestionByLabelItem(
-            source_node_key=source_node_key,
-            file_path=file_path,
-            suggestion_key=suggestion_key,
-            node_key=None,
-            status="created",
-            code=code if req.return_code else None
-        ))
-        agg_item = {"file_path": file_path, "suggestion_key": suggestion_key, "status": "created"}
-        if req.return_code:
-            agg_item["code"] = code
-        agg_items.append(agg_item)
-
-    agg = upsert_code_suggestion_aggregate(
-        map_id=map_id,
-        parent_key=parent_key,
-        repo_url=req.repo_url,
-        items=agg_items,
-        label=f"코드 추천 · {req.label}",
-        idempotency_key=None,
-    )
-
-    return SuggestionByLabelResponse(
-        map_id=map_id,
-        label=req.label,
-        total_target_files=len(targets),
-        created=created,
-        items=items,
-        aggregate_node_key=agg["node_key"],
-    )
-
-
 # -------------------- auto (프롬프트로 라벨 자동 추론 · 집계 저장) --------------------
 class SuggestionAutoRequest(BaseModel):
     repo_url: str
@@ -486,6 +191,206 @@ def create_suggestions_auto(map_id: str, req: SuggestionAutoRequest):
         prompt=req.prompt,
         chosen_scopes=[chosen_label],   # "코드 추천 · ..."가 아니라 실제 스코프명
         candidates=candidates,
+        total_target_files=len(targets),
+        created=created,
+        items=items,
+        aggregate_node_key=agg["node_key"],
+    )
+
+def resolve_source_node_key(map_id: str, repo_url: str, file_path: str) -> str:
+    """file_path를 참조하는 노드가 있으면 그 키를, 없으면 파일 노드를 하나 만들어 반환"""
+    hit = list(db.aql.execute(
+        """
+        FOR n IN mindmap_nodes
+          FILTER n.map_id == @map_id
+          FILTER ANY rf IN n.related_files
+                 SATISFIES (IS_STRING(rf) AND rf == @fp) OR (IS_OBJECT(rf) AND rf.file_path == @fp)
+          END
+          LIMIT 1
+          RETURN n
+        """,
+        bind_vars={"map_id": map_id, "fp": file_path}
+    ))
+    if hit:
+        return hit[0]["_key"]
+
+    # 파일 노드 생성
+    file_name = file_path.split("/")[-1]
+    label = f"[FILE] {file_name}"
+    file_node_key = generate_node_key(map_id, label)
+    if not document_exists("mindmap_nodes", file_node_key):
+        insert_document("mindmap_nodes", {
+            "_key": file_node_key,
+            "map_id": map_id,
+            "repo_url": repo_url,
+            "mode": "FILE",
+            "label": label,
+            "node_type": "file",
+            "related_files": [file_path],
+            "origin": "human",
+            "ai_generated": False
+        })
+    return file_node_key
+
+@router.get(
+    "/{suggestion_key}",
+    response_model=SuggestionDetailResponse,
+    summary="제안 상세 조회"
+)
+def get_suggestion(suggestion_key: str):
+    doc = get_document_by_key("code_recommendations", suggestion_key)
+    if not doc:
+        raise HTTPException(404, "Suggestion not found")
+
+    origin = doc.get("origin") or ("ai" if doc.get("model") else "human")
+    ai_generated = bool(doc.get("ai_generated", origin == "ai"))
+
+    return SuggestionDetailResponse(
+        suggestion_key=doc["_key"],
+        repo_url=doc["repo_url"],
+        file_path=doc["file_path"],
+        prompt=doc["prompt"],
+        code=doc.get("code", ""),
+        summary=doc.get("summary", ""),
+        rationale=doc.get("rationale", ""),
+        created_at=doc.get("created_at"),
+        origin=origin,
+        ai_generated=ai_generated,
+        model=doc.get("model")
+    )
+
+
+# -------------------- by-label (집계 저장) --------------------
+class SuggestionByLabelRequest(BaseModel):
+    repo_url: str
+    label: str
+    prompt: str
+    include_children: bool = True
+    max_files: int = 12
+    return_code: bool = False
+
+
+class SuggestionByLabelItem(BaseModel):
+    source_node_key: str
+    file_path: str
+    suggestion_key: Optional[str] = None
+    node_key: Optional[str] = None
+    status: str
+    error: Optional[str] = None
+    code: Optional[str] = None
+
+
+class SuggestionByLabelResponse(BaseModel):
+    map_id: str
+    label: str
+    total_target_files: int
+    created: int
+    items: List[SuggestionByLabelItem]
+    aggregate_node_key: Optional[str] = None
+
+
+@router.post(
+    "/{map_id}/by-label",
+    response_model=SuggestionByLabelResponse,
+    summary="라벨(및 자식) 스코프로 관련 파일들에 제안 일괄 생성 (집계 저장)"
+)
+def create_suggestions_by_label(map_id: str, req: SuggestionByLabelRequest):
+    if req.repo_url and derive_map_id(req.repo_url) != map_id:
+        raise HTTPException(400, "map_id and repo_url mismatch")
+
+    targets = gather_files_by_label(
+        map_id=map_id,
+        label_query=req.label,
+        include_children=req.include_children,
+        max_files=req.max_files
+    )
+    if not targets:
+        return SuggestionByLabelResponse(
+            map_id=map_id, label=req.label, total_target_files=0, created=0, items=[]
+        )
+
+    items: List[SuggestionByLabelItem] = []
+    agg_items: List[dict] = []
+    created = 0
+
+    # 대표 부모 노드: 첫 번째 타깃의 source_node_key 사용
+    parent_key = targets[0][0]
+    p8 = hashlib.md5(req.prompt.encode("utf-8")).hexdigest()[:8]
+
+    for source_node_key, file_path in targets:
+        original = load_original_code_by_path(req.repo_url, file_path)
+        if not original:
+            items.append(SuggestionByLabelItem(
+                source_node_key=source_node_key,
+                file_path=file_path,
+                status="skipped",
+                error="Original code not found"
+            ))
+            continue
+
+        ai_resp = generate_code_suggestion(file_path=file_path, original_code=original, prompt=req.prompt)
+        code = (ai_resp.get("code") or "").strip()
+        if not code:
+            items.append(SuggestionByLabelItem(
+                source_node_key=source_node_key,
+                file_path=file_path,
+                status="skipped",
+                error=ai_resp.get("error") or "No changes detected for this file (prompt mismatch or field not found).",
+                code=None
+            ))
+            continue
+
+        # 큰 코드 제한 (선택)
+        b = code.encode("utf-8")
+        if len(b) > 80_000:
+            code = b[:80_000].decode("utf-8", errors="ignore")
+
+        suggestion_key = hashlib.md5(f"{req.repo_url}_{file_path}_{p8}".encode("utf-8")).hexdigest()[:12]
+
+        if not document_exists("code_recommendations", suggestion_key):
+            insert_document("code_recommendations", {
+                "_key": suggestion_key,
+                "map_id": map_id,
+                "repo_url": req.repo_url,
+                "file_path": file_path,
+                "source_node_key": source_node_key,
+                "prompt": req.prompt,
+                "code": code,
+                "summary": ai_resp.get("summary", ""),
+                "rationale": ai_resp.get("rationale", ""),
+                "ai_status": "success",
+                "model": GEMINI_MODEL,
+                "created_at": datetime.utcnow().isoformat() + "Z",
+                "origin": "ai",
+                "ai_generated": True
+            })
+
+        created += 1
+        items.append(SuggestionByLabelItem(
+            source_node_key=source_node_key,
+            file_path=file_path,
+            suggestion_key=suggestion_key,
+            node_key=None,
+            status="created",
+            code=code if req.return_code else None
+        ))
+        agg_item = {"file_path": file_path, "suggestion_key": suggestion_key, "status": "created"}
+        if req.return_code:
+            agg_item["code"] = code
+        agg_items.append(agg_item)
+
+    agg = upsert_code_suggestion_aggregate(
+        map_id=map_id,
+        parent_key=parent_key,
+        repo_url=req.repo_url,
+        items=agg_items,
+        label=f"코드 추천 · {req.label}",
+        idempotency_key=None,
+    )
+
+    return SuggestionByLabelResponse(
+        map_id=map_id,
+        label=req.label,
         total_target_files=len(targets),
         created=created,
         items=items,
