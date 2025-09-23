@@ -1,4 +1,3 @@
-# services/mindmap_service.py
 import hashlib
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -36,6 +35,9 @@ def save_mindmap_nodes_recursively(
     node: dict,
     parent_key: str | None = None,
     map_id: str | None = None,
+    *,
+    parallel: bool = False,         # ✅ 기본은 순차 저장(풀 고갈 방지)
+    max_workers: int = 2,           # ✅ 병렬 필요시에도 저동시성만 허용
 ):
     ensure_mindmap_indexes()
     map_id = map_id or derive_map_id(repo_url)
@@ -70,14 +72,25 @@ def save_mindmap_nodes_recursively(
                     "map_id": map_id,
                     "_from": f"mindmap_nodes/{parent_key}",
                     "_to": f"mindmap_nodes/{node_key}",
-                    # 기존 그래프 조회가 edge_type 컬럼을 읽으므로 같이 넣어두면 좋다
                     "edge_type": "contains",
                 },
             )
 
-    with ThreadPoolExecutor(max_workers=4) as ex:  # 병렬 제한
+    # ✅ 기본: 순차 저장 (연결풀 고갈/경합 방지)
+    if not parallel:
+        for c in children:
+            save_mindmap_nodes_recursively(
+                repo_url, c, node_key, map_id, parallel=False, max_workers=max_workers
+            )
+        return
+
+    # 옵션: 병렬 저장(필요할 때만, 저동시성)
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = [
-            ex.submit(save_mindmap_nodes_recursively, repo_url, c, node_key, map_id)
+            ex.submit(
+                save_mindmap_nodes_recursively,
+                repo_url, c, node_key, map_id, parallel=True, max_workers=max_workers
+            )
             for c in children
         ]
         for f in futs:
@@ -87,7 +100,6 @@ def save_mindmap_nodes_recursively(
 # ---------- 추가: 파일 경로 정규화/추정 유틸 ----------
 
 def _build_repo_lookup(map_id: str) -> Dict[str, Dict[str, Any]]:
-    """repo_files에서 filename -> {path, language, size, blob_sha} 맵 생성"""
     rows = list(
         db.aql.execute(
             """
@@ -148,7 +160,6 @@ def _jaccard(a: List[str], b: List[str]) -> float:
 
 
 def _load_repo_index(map_id: str) -> List[Dict[str, Any]]:
-    """라벨→파일 추정용 인덱스: repo_files에서 각 파일의 토큰 리스트 생성"""
     rows = list(
         db.aql.execute(
             """
@@ -182,7 +193,6 @@ def _suggest_files_from_label(
     limit: int = 2,
     threshold: float = 0.45,
 ) -> List[Dict[str, Any]]:
-    """related_files가 비어 있을 때, 라벨 토큰으로 후보 파일을 추정 (응답에만; DB 저장 X)"""
     ltok = _tokens_from_label(label)
     if not ltok:
         return []
@@ -212,19 +222,13 @@ def _suggest_files_from_label(
                 "language": it.get("language"),
                 "size": it.get("size"),
                 "blob_sha": it.get("blob_sha"),
-                "suggested": True,  # 프론트에서 뱃지 처리용
+                "suggested": True,
             }
         )
     return picks
 
 
 def _normalize_related_files(map_id: str, rel) -> List[Dict[str, Any]]:
-    """
-    - 이미 객체 배열({file_path: ...})이면 그대로
-    - 문자열 배열이면 filename 기준으로 repo_files 매핑 → {file_path, ...}
-    - 문자열이 경로 형태면 그대로 {file_path: ...}
-    - 매핑 실패는 unresolved 표시
-    """
     if isinstance(rel, list) and rel and isinstance(rel[0], dict) and rel[0].get("file_path"):
         return rel
 
@@ -237,7 +241,6 @@ def _normalize_related_files(map_id: str, rel) -> List[Dict[str, Any]]:
             if not sname:
                 continue
 
-            # 이미 경로 형태면 그대로 사용
             if "/" in sname and "." in sname:
                 if sname in seen:
                     continue
@@ -245,7 +248,6 @@ def _normalize_related_files(map_id: str, rel) -> List[Dict[str, Any]]:
                 out.append({"file_path": sname})
                 continue
 
-            # filename → repo_files lookup
             doc = lookup.get(sname)
             if doc and doc.get("path"):
                 fp = doc["path"]
@@ -261,7 +263,6 @@ def _normalize_related_files(map_id: str, rel) -> List[Dict[str, Any]]:
                     }
                 )
             else:
-                # 마지막 폴백
                 if sname in seen:
                     continue
                 seen.add(sname)
@@ -274,9 +275,6 @@ def _normalize_related_files(map_id: str, rel) -> List[Dict[str, Any]]:
 # ---------- 조회 ----------
 
 def get_mindmap_graph(map_id: str):
-    """프론트용 그래프: related_files를 항상 file_path 객체 배열로 반환.
-    비어 있으면 라벨 기반 추정도 함께 제공(응답에만).
-    """
     ensure_mindmap_indexes()
 
     edges_raw = list(
@@ -317,11 +315,9 @@ def get_mindmap_graph(map_id: str):
             )
         )
 
-        # 1) 문자열/경로 → file_path 객체로 정규화
         for n in nodes_list:
             n["related_files"] = _normalize_related_files(map_id, n.get("related_files"))
 
-        # 2) 여전히 비어 있으면 라벨 기반 추정(응답에만)
         repo_index = _load_repo_index(map_id)
         for n in nodes_list:
             if not n.get("related_files"):
@@ -346,9 +342,6 @@ def get_mindmap_graph(map_id: str):
 
 
 def save_mindmap_graph():
-    """
-    최초 실행 시 mindmap_graph 및 관련 컬렉션 생성
-    """
     if not db.has_graph("mindmap_graph"):
         graph = db.create_graph("mindmap_graph")
         if not db.has_collection("mindmap_nodes"):
@@ -366,7 +359,7 @@ def save_mindmap_graph():
     ensure_mindmap_indexes()
 
 
-# ---------- 🔥 추가: 루트 노드 찾기(대표 부모 선택에 사용) ----------
+# ---------- 🔥 추가: 루트 노드 찾기 ----------
 
 def find_root_node_key(map_id: str) -> Optional[str]:
     rows = list(
