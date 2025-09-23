@@ -89,7 +89,7 @@ def fetch_and_store_repo(repo_url: str, default_branch: str = "main") -> dict:
 
     files_saved = 0
     files_parsed = 0
-    seen_keys = set()  # 🔸 중복 방지
+    seen_keys = set()  # 중복 방지
 
     with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
         for info in zf.infolist():
@@ -127,7 +127,7 @@ def fetch_and_store_repo(repo_url: str, default_branch: str = "main") -> dict:
             pr = parse_code_by_language(lang, content)
             if any(pr.values()):
                 insert_document("code_analysis", {
-                    "_key": key,                    # 🔸 repo_id__경로 규칙
+                    "_key": key,                    # repo_id__경로 규칙
                     "repo_id": repo_id,
                     "filename": path,
                     "language": lang,

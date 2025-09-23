@@ -36,8 +36,8 @@ def save_mindmap_nodes_recursively(
     parent_key: str | None = None,
     map_id: str | None = None,
     *,
-    parallel: bool = False,         # ✅ 기본은 순차 저장(풀 고갈 방지)
-    max_workers: int = 2,           # ✅ 병렬 필요시에도 저동시성만 허용
+    parallel: bool = False,         # 기본은 순차 저장(풀 고갈 방지)
+    max_workers: int = 2,           # 병렬 필요시에도 저동시성만 허용
 ):
     ensure_mindmap_indexes()
     map_id = map_id or derive_map_id(repo_url)
@@ -76,7 +76,7 @@ def save_mindmap_nodes_recursively(
                 },
             )
 
-    # ✅ 기본: 순차 저장 (연결풀 고갈/경합 방지)
+    # 기본: 순차 저장 (연결풀 고갈/경합 방지)
     if not parallel:
         for c in children:
             save_mindmap_nodes_recursively(
@@ -97,7 +97,7 @@ def save_mindmap_nodes_recursively(
             f.result()
 
 
-# ---------- 추가: 파일 경로 정규화/추정 유틸 ----------
+# 추가: 파일 경로 정규화/추정 유틸
 
 def _build_repo_lookup(map_id: str) -> Dict[str, Dict[str, Any]]:
     rows = list(
@@ -272,8 +272,7 @@ def _normalize_related_files(map_id: str, rel) -> List[Dict[str, Any]]:
     return []
 
 
-# ---------- 조회 ----------
-
+# 조회
 def get_mindmap_graph(map_id: str):
     ensure_mindmap_indexes()
 
@@ -359,7 +358,7 @@ def save_mindmap_graph():
     ensure_mindmap_indexes()
 
 
-# ---------- 🔥 추가: 루트 노드 찾기 ----------
+# 추가: 루트 노드 찾기
 
 def find_root_node_key(map_id: str) -> Optional[str]:
     rows = list(

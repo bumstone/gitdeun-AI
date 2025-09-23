@@ -19,10 +19,7 @@ from services.arangodb_service import db
 # 지원 확장자
 CODE_EXTS = (".java", ".kt", ".py", ".ts", ".js", ".go", ".rb", ".cs", ".cpp")
 
-
-# ------------------------------------------------------------
-# (A) 파일 경로/이름 보조
-# ------------------------------------------------------------
+# 파일 경로/이름 보조
 def _extract_filename_from_prompt(prompt: str, SUPPORTED_EXT=None) -> Optional[str]:
     # 기본값 보정
     if SUPPORTED_EXT is None:
@@ -32,7 +29,6 @@ def _extract_filename_from_prompt(prompt: str, SUPPORTED_EXT=None) -> Optional[s
     if m:
         return m.group(1).split("/")[-1]
     return None
-
 
 def _find_paths_by_filename(repo_id: str, filename: str) -> List[str]:
     paths = list(db.aql.execute("""
@@ -47,7 +43,6 @@ def _find_paths_by_filename(repo_id: str, filename: str) -> List[str]:
         return (main_boost + test_penalty, len(p))
     return sorted(set(paths), key=score)
 
-
 def _auto_choose_path(candidates: List[str]) -> Optional[str]:
     if not candidates:
         return None
@@ -61,7 +56,6 @@ def _auto_choose_path(candidates: List[str]) -> Optional[str]:
         if "/test/" not in p:
             return p
     return candidates[0]
-
 
 def _resolve_to_full_path(repo_id: str, name_or_path: str) -> Optional[str]:
     if not name_or_path:
@@ -81,7 +75,6 @@ def _resolve_to_full_path(repo_id: str, name_or_path: str) -> Optional[str]:
     def score(p: str):
         return (-10 if "src/main" in p else 0) + (10 if "/test/" in p or "src/test" in p else 0), len(p)
     return sorted(set(rows), key=score)[0]
-
 
 def resolve_file_path_auto(repo_url: str, prompt: str, source_node_key: Optional[str] = None) -> Tuple[Optional[str], List[str], str]:
     repo_id = derive_map_id(repo_url)
@@ -108,10 +101,8 @@ def resolve_file_path_auto(repo_url: str, prompt: str, source_node_key: Optional
         return chosen, paths, "prompt_filename_auto_chosen"
     return None, [], "no_filename"
 
+# 단건 제안 생성(공통)
 
-# ------------------------------------------------------------
-# (B) 단건 제안 생성(공통)
-# ------------------------------------------------------------
 def create_code_suggestion_node(
     map_id: str,
     repo_url: str,
@@ -204,15 +195,12 @@ def create_code_suggestion_node(
         resp["code"] = code_text
     return resp
 
+# 라벨 자동 추론 + 파일 수집
 
-# ------------------------------------------------------------
-# (C) 라벨 자동 추론 + 파일 수집
-# ------------------------------------------------------------
 def _normalize_kor(s: str) -> str:
     s = re.sub(r"[()]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
-
 
 def _extract_scope_terms(prompt: str, max_k: int = 6) -> List[str]:
     # 핵심명사 위주 토큰 (한글/영문/숫자)
@@ -230,7 +218,6 @@ def _extract_scope_terms(prompt: str, max_k: int = 6) -> List[str]:
             out.append(t)
             seen.add(n)
     return out[:max_k] or toks[:max_k]
-
 
 def resolve_scope_nodes_from_prompt(map_id: str, prompt: str, top_n: int = 3) -> List[Dict]:
     """
@@ -264,7 +251,6 @@ def resolve_scope_nodes_from_prompt(map_id: str, prompt: str, top_n: int = 3) ->
 def _hash12(s: str) -> str:
     return hashlib.md5(s.encode("utf-8")).hexdigest()[:12]
 
-
 def _to_file_path(rf: Any) -> Optional[str]:
     """
     related_files 원소에서 파일 경로만 추출:
@@ -277,7 +263,6 @@ def _to_file_path(rf: Any) -> Optional[str]:
     if isinstance(rf, dict):
         return rf.get("file_path") or rf.get("path") or rf.get("filename")
     return None
-
 
 def _paths_from_related(related_files: Any) -> List[str]:
     out: List[str] = []
@@ -327,7 +312,6 @@ def gather_files_by_node_key(
                 return out
 
     return out
-
 
 def gather_files_by_label(
     map_id: str,

@@ -6,7 +6,7 @@
 # - 공통 insert/get 유틸을 안전한 upsert 형태로 개선(409 방지)
 # - STARTS_WITH/ENDSWITH 미지원 환경을 위해 LIKE/CONCAT 사용
 # - 인덱스 추가로 조회 성능 보강
-# - ✅ ARANGODB_URL(.env) 우선 적용: ngrok/https 등 외부 터널 URL을 그대로 사용
+# - ARANGODB_URL(.env) 우선 적용: ngrok/https 등 외부 터널 URL을 그대로 사용
 
 from datetime import datetime
 from typing import List, Optional
@@ -15,8 +15,6 @@ import os
 
 from arango import ArangoClient
 from arango.exceptions import (
-    AQLQueryExecuteError,
-    ArangoServerError,
     DocumentInsertError,
 )
 
@@ -25,10 +23,9 @@ from config import (
     ARANGODB_USERNAME, ARANGODB_PASSWORD, ARANGODB_DB
 )
 
-# -----------------------------------
 # 클라이언트 초기화 (ARANGODB_URL 우선)
-# -----------------------------------
-ARANGODB_URL = os.getenv("ARANGODB_URL")  # 예: https://xxxx.ngrok-free.app
+
+ARANGODB_URL = os.getenv("ARANGODB_URL")
 EFFECTIVE_HOSTS = ARANGODB_URL or f"http://{ARANGODB_HOST}:{ARANGODB_PORT}"
 
 logging.getLogger().setLevel("INFO")
@@ -36,35 +33,8 @@ logging.info(
     f"[ARANGO CONF] hosts={EFFECTIVE_HOSTS} user={ARANGODB_USERNAME} db={ARANGODB_DB}"
 )
 
-# hosts 에는 http://host:port 또는 https://도 가능
 client = ArangoClient(hosts=EFFECTIVE_HOSTS)
 db = client.db(ARANGODB_DB, username=ARANGODB_USERNAME, password=ARANGODB_PASSWORD)
-
-
-def ensure_collections():
-    """필요 컬렉션/인덱스 보장 (여러 번 호출해도 안전)"""
-    for name in ["repos", "repo_files", "code_analysis", "mindmap_nodes", "mindmap_edges", "code_recommendations"]:
-        if not db.has_collection(name):
-            if name.endswith("_edges"):
-                db.create_collection(name, edge=True)
-            else:
-                db.create_collection(name)
-
-    # 인덱스 생성(중복 에러는 무시)
-    try:
-        rf = db.collection("repo_files")
-        rf.add_hash_index(["repo_id"])
-        rf.add_hash_index(["repo_id", "path"])
-    except Exception:
-        pass
-
-    try:
-        ca = db.collection("code_analysis")
-        ca.add_hash_index(["repo_id"])
-        ca.add_hash_index(["filename"])
-    except Exception:
-        pass
-
 
 def insert_document(collection_name: str, data: dict):
     """
@@ -131,7 +101,7 @@ def get_documents_by_key_prefix(collection_name: str, prefix: str):
     return list(db.aql.execute(aql, bind_vars={"prefix": prefix}))
 
 
-# ---------- 레포/파일 저장 전용 유틸 ----------
+# 레포/파일 저장 전용 유틸
 
 def path_key(repo_id: str, path: str) -> str:
     """_key 규칙: repo_id__경로(슬래시는 __로)"""
@@ -165,7 +135,7 @@ def upsert_repo_file(repo_id: str, path: str, language: str, content: str, size:
         "language": language,
         "size": size,
         "sha": sha,
-        "content": content,        # 🔸 파일 본문
+        "content": content,        # 파일 본문
         "fetched_at": datetime.utcnow().isoformat() + "Z",
     }
     if coll.has(key):
@@ -275,7 +245,7 @@ def ensure_collections():
     except Exception: pass
 
 
-# -------------------- 프롬프트 히스토리 --------------------
+# 프롬프트 히스토리
 
 def insert_prompt_doc(doc: dict) -> str:
     """프롬프트 기록을 남기고 _key를 반환"""
@@ -341,7 +311,7 @@ def upsert_prompt_title(prompt_id: str, title: str, summary: str):
         coll.update(doc)
 
 
-# -------------------- 그래프 업서트 (확장용) --------------------
+# 그래프 업서트 (확장용)
 
 def upsert_nodes_edges(map_id: str, nodes: list[dict], edges: list[dict], default_mode: str = "FEATURE") -> list[str]:
     """
