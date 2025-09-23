@@ -104,3 +104,9 @@ yarn-error.log*
 docker-data/
 .env.docker
 .idea/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.venv/
+.env

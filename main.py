@@ -1,6 +1,6 @@
 # main.py
 from fastapi import FastAPI
-from routers import auth, mindmap, recommend, meeting, github, repo, suggestion
+from routers import auth, mindmap, recommend, meeting, github, repo, suggestion, content
 
 app = FastAPI(
     title="Gitdeun API",
@@ -26,3 +26,4 @@ app.include_router(meeting.router, prefix="/meeting", tags=["Meeting"])
 app.include_router(github.router, prefix="/github", tags=["GitHub"])
 app.include_router(repo.router, prefix="/repo", tags=["Repository"])
 app.include_router(suggestion.router, prefix="/suggestion", tags=["Suggestion"])
+app.include_router(content.router, prefix="/content", tags=["Content"])
