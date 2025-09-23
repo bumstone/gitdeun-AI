@@ -32,7 +32,7 @@ from services.arangodb_service import (
 # 텍스트/소스 위주로만 저장 (바이너리/대용량은 제외)
 TEXT_EXT = {
     ".py", ".java", ".kt", ".js", ".ts", ".go", ".cpp", ".cc", ".cxx", ".cs", ".rb",
-    ".md", ".json", ".yml", ".yaml", ".xml", ".gradle", ".properties", ".txt"
+    ".md", ".json", ".yml", ".yaml", ".xml", ".gradle", ".properties", ".txt", ".jsx", ".tsx", ".json", ".css", ".scss", ".html"
 }
 
 
@@ -44,7 +44,9 @@ def detect_language_from_filename(filename: str) -> str:
     fn = filename.lower()
     if fn.endswith(".py"): return "python"
     if fn.endswith(".js"): return "javascript"
+    if fn.endswith(".jsx"): return "javascript"
     if fn.endswith(".ts"): return "typescript"
+    if fn.endswith(".tsx"):  return "typescript"
     if fn.endswith(".java"): return "java"
     if fn.endswith(".kt"): return "kotlin"
     if fn.endswith(".go"): return "go"

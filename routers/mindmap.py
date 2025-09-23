@@ -11,16 +11,13 @@ from services.arangodb_service import (
     get_prompt_doc,
     insert_prompt_doc,
     upsert_prompt_title,
-    upsert_nodes_edges,
 )
-from services.gemini_service import ai_expand_graph, ai_make_title
+from services.gemini_service import ai_make_title
 from services.mindmap_service import (
     save_mindmap_nodes_recursively,
     get_mindmap_graph,
-    derive_map_id, find_root_node_key,
+    derive_map_id, _normalize_related_files
 )
-from services.suggestion_service import create_code_suggestion_node, upsert_code_suggestion_aggregate
-
 router = APIRouter()
 
 @router.post("/analyze-ai", summary="Gemini로 마인드맵 생성 (빠른/간결, repo_url 기준)")
@@ -164,7 +161,7 @@ def refresh_latest(map_id: str, req: RefreshLatestRequest):
         "dirs_analyzed": saved_dirs,
     }
 
-# E. 맵 삭제 (노드/엣지/추천)
+# 맵 삭제 (노드/엣지/추천)
 @router.delete("/{map_id}", summary="해당 맵의 mindmap_nodes/edges 삭제")
 def drop_map(
     map_id: str,
@@ -179,7 +176,7 @@ def drop_map(
     res = delete_mindmap(map_id, also_recommendations=also_recommendations)
     return {"message": "deleted", "map_id": map_id, **res}
 
-# F. 제목 생성 (그래프+프롬프트 요약 기반)
+# 제목 생성 (그래프+프롬프트 요약 기반)
 
 class TitleRequest(BaseModel):
     prompt_id: Optional[str] = None
@@ -233,3 +230,128 @@ def make_title(map_id: str, req: TitleRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ------------------------------
+# 특정 노드 상세 조회 (이웃/엣지 포함)
+# ------------------------------
+class NodeDetailResponse(BaseModel):
+    map_id: str
+    node: Dict[str, Any]
+    in_edges: List[Dict[str, Any]]
+    out_edges: List[Dict[str, Any]]
+    neighbors: Dict[str, List[Dict[str, Any]]]  # {"in": [...], "out": [...]}
+
+
+@router.get(
+    "/{map_id}/nodes/{node_key}",
+    summary="특정 노드 상세(연결 엣지·이웃 포함) 반환",
+    response_model=NodeDetailResponse,
+)
+def get_node_detail(
+    map_id: str,
+    node_key: str,
+    normalize_files: bool = True,  # related_files를 file_path 객체로 정규화
+):
+    # 1) 노드 조회
+    rows = list(
+        db.aql.execute(
+            """
+            FOR n IN mindmap_nodes
+              FILTER n.map_id == @map_id AND n._key == @key
+              RETURN {
+                key: n._key,
+                label: n.label,
+                related_files: n.related_files,
+                node_type: n.node_type,
+                repo_url: n.repo_url
+              }
+            """,
+            bind_vars={"map_id": map_id, "key": node_key},
+        )
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="node not found")
+
+    node = rows[0]
+    if normalize_files:
+        node["related_files"] = _normalize_related_files(map_id, node.get("related_files"))
+
+    # 2) 엣지(OUT)
+    edges_out = list(
+        db.aql.execute(
+            """
+            FOR e IN mindmap_edges
+              FILTER e.map_id == @map_id AND e._from == CONCAT('mindmap_nodes/', @key)
+              LET fromKey = LAST(SPLIT(e._from, '/'))
+              LET toKey   = LAST(SPLIT(e._to, '/'))
+              RETURN { from: fromKey, to: toKey, edge_type: e.edge_type }
+            """,
+            bind_vars={"map_id": map_id, "key": node_key},
+        )
+    )
+
+    # 3) 엣지(IN)
+    edges_in = list(
+        db.aql.execute(
+            """
+            FOR e IN mindmap_edges
+              FILTER e.map_id == @map_id AND e._to == CONCAT('mindmap_nodes/', @key)
+              LET fromKey = LAST(SPLIT(e._from, '/'))
+              LET toKey   = LAST(SPLIT(e._to, '/'))
+              RETURN { from: fromKey, to: toKey, edge_type: e.edge_type }
+            """,
+            bind_vars={"map_id": map_id, "key": node_key},
+        )
+    )
+
+    # 4) 이웃 노드들 조회
+    out_neighbor_keys = [e["to"] for e in edges_out]
+    in_neighbor_keys = [e["from"] for e in edges_in]
+    all_neighbor_keys = list({*out_neighbor_keys, *in_neighbor_keys})
+
+    neighbors_out: List[Dict[str, Any]] = []
+    neighbors_in: List[Dict[str, Any]] = []
+
+    if all_neighbor_keys:
+        neighbor_rows = list(
+            db.aql.execute(
+                """
+                FOR n IN mindmap_nodes
+                  FILTER n.map_id == @map_id AND n._key IN @keys
+                  RETURN {
+                    key: n._key,
+                    label: n.label,
+                    related_files: n.related_files,
+                    node_type: n.node_type,
+                    repo_url: n.repo_url
+                  }
+                """,
+                bind_vars={"map_id": map_id, "keys": all_neighbor_keys},
+            )
+        )
+        # key -> row 매핑
+        ndict = {n["key"]: n for n in neighbor_rows}
+
+        # 방향에 따라 분류 + 정규화
+        for k in out_neighbor_keys:
+            if k in ndict:
+                n = dict(ndict[k])
+                if normalize_files:
+                    n["related_files"] = _normalize_related_files(map_id, n.get("related_files"))
+                neighbors_out.append(n)
+
+        for k in in_neighbor_keys:
+            if k in ndict:
+                n = dict(ndict[k])
+                if normalize_files:
+                    n["related_files"] = _normalize_related_files(map_id, n.get("related_files"))
+                neighbors_in.append(n)
+
+    return {
+        "map_id": map_id,
+        "node": node,
+        "in_edges": edges_in,
+        "out_edges": edges_out,
+        "neighbors": {"in": neighbors_in, "out": neighbors_out},
+    }
+
