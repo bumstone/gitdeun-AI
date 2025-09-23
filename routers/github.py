@@ -65,7 +65,7 @@ def analyze_repository(req: GitRepoRequest):
 
     # DB에서 목록
     code_files = [f for f in load_repository_files(repo_url) if f.endswith((
-        ".py", ".java", ".kt", ".js", ".ts", ".go", ".cpp", ".cs", ".rb"
+        ".py", ".java", ".kt", ".js", ".ts", ".go", ".cpp", ".cs", ".rb", "jsx"
     ))]
 
     mindmap_nodes = []

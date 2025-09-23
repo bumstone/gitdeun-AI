@@ -1,11 +1,12 @@
 import os, json, re
 from dotenv import load_dotenv
 import google.generativeai as genai
+from typing import Dict, Any, List, Tuple
 
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
-    raise ValueError("❗ GEMINI_API_KEY is not set in .env")
+    raise ValueError("GEMINI_API_KEY is not set in .env")
 
 genai.configure(api_key=api_key)
 GEMINI_MODEL = "models/gemini-2.5-pro"
@@ -25,7 +26,7 @@ def summarize_directory_code(dir_name: str, file_blocks: list) -> dict:
 아래는 `{dir_name}` 디렉터리에 포함된 여러 코드 파일입니다.
 이 디렉터리가 어떤 기능을 담당하는지, 그리고 포함된 기능들을 마인드맵 구조로 요약해주세요.
 
-💡 JSON 출력 형식 예시:
+ JSON 출력 형식 예시:
 ```json
 {{
   "node": "기능 이름",
@@ -42,7 +43,7 @@ def summarize_directory_code(dir_name: str, file_blocks: list) -> dict:
 {files_str}
 """
     result = request_gemini(PROMPT)
-    print(f"📌 Gemini 요약 응답 ({dir_name}):\n{result}")
+    print(f" Gemini 요약 응답 ({dir_name}):\n{result}")
 
     try:
         match = re.search(r"```json\s*({.*?})\s*```", result, re.DOTALL)
@@ -56,7 +57,7 @@ def summarize_directory_code(dir_name: str, file_blocks: list) -> dict:
 
 def generate_code_from_prompt(prompt: str) -> str:
     full_prompt = f"""
-💡 사용자 요청:
+ 사용자 요청:
 {prompt}
 
 아래 요청을 기반으로 실제 작동 가능한 Python 예제 코드를 작성해주세요.
@@ -130,32 +131,6 @@ JSON 스키마:
             "gemini_result": result
         }
 
-from typing import Dict, Any, List, Tuple
-
-def ai_expand_graph(prompt: str, mode: str, current_graph: Dict, target_nodes: List[str], related_files: List[str], temperature: float) -> Dict[str, Any]:
-    """
-    현재 그래프 + 사용자 프롬프트를 결합해 노드/엣지 확장.
-    반환: {"nodes":[{key,label,meta}], "edges":[{from,to,type}], "highlight_keys":[...], "summary":"..."}
-    실제 구현에서는 Gemini 프롬프트 템플릿을 구성해 응답 JSON을 파싱하세요.
-    아래는 안전한 더미/포맷 예시.
-    """
-    # 간단한 키 생성 (실전: back-end의 generate_node_key 규칙과 합치면 더 좋음)
-    key = "feat_" + re.sub(r"[^a-z0-9]+", "_", prompt.lower())[:20]
-    new_nodes = [{
-        "key": key,
-        "label": "AI-Driven Feature",
-        "meta": {"mode": mode, "files": related_files, "node_type": "FEATURE"}
-    }]
-    # 연결 타깃이 있으면 첫 타깃과 연결, 없으면 루트 격 노드는 그대로 추가
-    edges = []
-    if target_nodes:
-        edges.append({"from": target_nodes[0], "to": key, "type": "ENHANCES"})
-    return {
-        "nodes": new_nodes,
-        "edges": edges,
-        "highlight_keys": [key],
-        "summary": "사용자 프롬프트 기반 기능 노드를 추가했습니다."
-    }
 
 def ai_make_title(graph: Dict[str, Any], prompt: str | None, max_len: int) -> Tuple[str, str]:
     """

@@ -24,7 +24,6 @@ def save_repository_info(repo_url: str):
         "description": repo_obj.description,
         "default_branch": repo_obj.default_branch,
         "last_commit": last_utc
-        # repo_obj.get_commits()[0].commit.author.date.isoformat()
     }
 
     insert_document("repositories", data)
