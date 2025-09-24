@@ -252,21 +252,24 @@ def _resolve_full_path_by_filename(map_id: str, filename: str) -> Optional[str]:
     rows.sort(key=lambda p: (len(p), p))
     return rows[0]
 
-@router.get("/file/by-node", summary="노드 기준 코드 본문 조회 (AI → 원본 폴백)")
+@router.get("/file/by-node", summary="노드 기준 코드 본문 조회 (노드 타입별 기본 prefer, AI→원본 폴백)")
 def read_code_by_node(
     node_key: str = Query(..., description="mindmap_nodes._key"),
     file_path: Optional[str] = Query(None, description="파일 경로 또는 파일명(예: Alarm.tsx)"),
-    prefer: str = Query("auto", regex="^(auto|ai|original)$", description="ai|original|auto"),
+    prefer: Optional[str] = Query(None, regex="^(auto|ai|original)$", description="ai|original|auto (미지정 시 노드타입으로 결정)"),
 ):
     """
     동작 순서:
-    1) node_key로 노드 로드 → repo_id 결정
+    1) node_key로 노드 로드 → map_id/노드타입 결정
+       - prefer 기본값: AGGREGATED_SUGGESTIONS → auto, 그 외 → original
     2) file_path가 파일명이라면 repo_files에서 '가장 짧은 경로'로 해석
     3) prefer != original 이면 AI 코드 시도:
        3-1) 노드.related_files 안의 suggestion_key 먼저 확인
-       3-2) 없으면 code_recommendations에서 (node_key, file_path) 최신 1건 조회
-       3-3) 둘 다 없으면 원본으로 폴백
+       3-2) 없으면 code_recommendations에서 (source_node_key = node_key) 최신 1건 조회
+       3-3) 실패 시 prefer=auto면 원본으로 폴백, prefer=ai면 404
+    4) 원본 코드 반환(경로 재추정 1회 포함)
     """
+    # 0) 노드 로드
     node = get_mindmap_node(node_key)
     if not node:
         raise HTTPException(status_code=404, detail="node not found")
@@ -275,13 +278,19 @@ def read_code_by_node(
     if not map_id:
         raise HTTPException(status_code=400, detail="cannot resolve map_id")
 
-    # 1) file_path 해석(파일명만 온 경우 → 경로로 승격)
+    node_type = (node or {}).get("node_type")
+
+    # 1) prefer 기본값 결정 (노드 타입별)
+    if not prefer:
+        prefer = "auto" if node_type == "AGGREGATED_SUGGESTIONS" else "original"
+    prefer = prefer.lower()
+
+    # 2) file_path 해석(파일명만 온 경우 → 경로로 승격)
     fp_input = (file_path or "").strip()
     if not fp_input:
         # 노드에 파일이 1개뿐이면 그걸 기본값으로
         rel = node.get("related_files") or []
         if isinstance(rel, list) and rel:
-            # dict 또는 str 모두 고려
             first = rel[0]
             if isinstance(first, dict) and first.get("file_path"):
                 fp_input = first["file_path"]
@@ -295,46 +304,49 @@ def read_code_by_node(
     else:
         resolved_path = find_file_path_by_filename(map_id, fp_input) or fp_input  # 못찾아도 진행
 
-    # 2) AI 코드 우선 시도 (prefer != original)
+    # 3) AI 코드 우선 시도 (prefer != original)
     if prefer in ("ai", "auto"):
-        # 2-1) 노드.related_files에 suggestion_key가 달린 항목이 있는지 먼저 확인
+        # 3-1) 노드.related_files에 suggestion_key가 달린 항목이 있는지 먼저 확인
         rel = node.get("related_files") or []
         skey = None
         if isinstance(rel, list):
             for it in rel:
                 if isinstance(it, dict) and it.get("suggestion_key"):
-                    # file_path가 완전일치 or 말미 일치
                     rp = it.get("file_path") or ""
+                    # 경로 완전/말미 일치 체크
                     if rp == resolved_path or rp.endswith("/" + resolved_path) or resolved_path.endswith("/" + rp):
                         skey = it["suggestion_key"]
                         break
 
-        # 2-2) 없으면 최신 제안을 DB에서 탐색 (우선 source_node_key로 필터)
+        # 3-2) 없으면 최신 제안을 DB에서 탐색 (⚠ None 바인딩 금지: source_node_key 있을 때만 필터)
         reco = None
         if skey:
             reco = get_code_recommendation_by_key(skey)
         if not reco:
-            reco = get_latest_code_recommendation(map_id, resolved_path, source_node_key=node_key)
-        if not reco:
-            # source_node_key 없이도 마지막 시도
-            reco = get_latest_code_recommendation(map_id, resolved_path, source_node_key=None)
+            # 노드 기준 최신 AI 제안만 시도 (source_node_key 전달)
+            try:
+                reco = get_latest_code_recommendation(map_id, resolved_path, source_node_key=node_key)
+            except Exception:
+                # 서비스 내부 쿼리 스키마가 다를 수 있으니 조용히 스킵하고 폴백
+                reco = None
 
         if reco and (reco.get("code") or ""):
+            code_text = reco.get("code") or ""
             return {
                 "node_key": node_key,
                 "map_id": map_id,
                 "path": resolved_path,
                 "origin": "ai",
                 "suggestion_key": reco["_key"],
-                "code": reco["code"],
-                "length": len(reco["code"]),
+                "code": code_text,
+                "length": len(code_text),
             }
 
         # prefer=ai 면 여기서 끝내고 404 반환
         if prefer == "ai":
             raise HTTPException(status_code=404, detail="ai code not found")
 
-    # 3) 원본 코드 반환
+    # 4) 원본 코드 반환
     original = get_repo_file_content(map_id, resolved_path)
     if not original:
         # 파일명이었고 매칭을 못했을 수 있으니 마지막으로 파일명 기준 한 번 더 재시도

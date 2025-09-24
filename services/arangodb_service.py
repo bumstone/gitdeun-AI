@@ -413,19 +413,16 @@ def get_code_recommendation_by_key(suggestion_key: str):
 
 def get_latest_code_recommendation(repo_id: str, file_path: str, source_node_key: str | None):
     query = """
-        FOR c IN code_recommendations
-          FILTER c.map_id == @rid
-          AND c.file_path == @fp
-    """
-    if source_node_key:
-        query += " AND c.source_node_key == @src "
-    query += """
-          SORT DATE_TIMESTAMP(c.created_at) DESC
-          LIMIT 1
-          RETURN c
+    FOR c IN code_recommendations
+      FILTER c.map_id == @rid
+        AND c.file_path == @fp
+        AND (@src == null OR c.source_node_key == @src)
+      SORT DATE_TIMESTAMP(c.created_at) DESC
+      LIMIT 1
+      RETURN c
     """
     rows = list(db.aql.execute(
         query,
-        bind_vars={"rid": repo_id, "fp": file_path, "src": source_node_key},
+        bind_vars={"rid": repo_id, "fp": file_path, "src": source_node_key}
     ))
     return rows[0] if rows else None
