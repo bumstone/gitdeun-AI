@@ -43,10 +43,8 @@ def get_repo_id_from_url(repo_url: str) -> str:
 def detect_language_from_filename(filename: str) -> str:
     fn = filename.lower()
     if fn.endswith(".py"): return "python"
-    if fn.endswith(".js"): return "javascript"
-    if fn.endswith(".jsx"): return "javascript"
-    if fn.endswith(".ts"): return "typescript"
-    if fn.endswith(".tsx"):  return "typescript"
+    if fn.endswith(".tsx") or fn.endswith(".ts") or fn.endswith(".d.ts"): return "typescript"
+    if fn.endswith(".jsx") or fn.endswith(".js"): return "javascript"
     if fn.endswith(".java"): return "java"
     if fn.endswith(".kt"): return "kotlin"
     if fn.endswith(".go"): return "go"
