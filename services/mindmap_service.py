@@ -260,6 +260,7 @@ def _normalize_related_files(map_id: str, rel) -> List[Dict[str, Any]]:
                         "language": doc.get("language"),
                         "size": doc.get("size"),
                         "blob_sha": doc.get("blob_sha"),
+                        "suggestion_key": (doc.get("suggestion_key") or (doc.get("links") or {}).get("suggestion_key"))
                     }
                 )
             else:
