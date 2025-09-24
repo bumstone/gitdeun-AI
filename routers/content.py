@@ -367,3 +367,45 @@ def read_code_by_node(
         "code": original,
         "length": len(original),
     }
+
+
+@router.get("/file/nodes", response_class=PlainTextResponse, summary="노드와 파일 경로로 파일 내용 조회")
+def get_file_from_node(
+        node_key: str = Query(..., description="마인드맵 노드의 키"),
+        file_path: str = Query(..., description="노드에 연결된 파일의 경로"),
+        start_line: Optional[int] = Query(None, ge=1),
+        end_line: Optional[int] = Query(None, ge=1),
+        decode_escaped: bool = False,
+):
+    """
+    특정 마인드맵 노드에 연결된 파일의 내용을 가져옵니다.
+    """
+    from services.arangodb_service import get_document_by_key
+    node_doc = get_document_by_key("mindmap_nodes", node_key)
+    if not node_doc:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    repo_id = node_doc.get("map_id") or derive_map_id(node_doc.get("repo_url", ""))
+    if not repo_id:
+        raise HTTPException(status_code=400, detail="repo_id or repo_url not found in the node")
+
+    related_files = node_doc.get("related_files", [])
+
+    found_file = None
+    for f in related_files:
+        path_in_doc = None
+        if isinstance(f, dict):
+            path_in_doc = f.get("file_path")
+        elif isinstance(f, str):
+            path_in_doc = f
+
+        # 전체 경로가 DB에 저장된 파일 이름으로 끝나는지 확인합니다.
+        if path_in_doc and file_path.endswith(path_in_doc):
+            found_file = f
+            break
+
+    if not found_file:
+        raise HTTPException(status_code=404, detail="File not found in the specified node")
+
+    data: FileContent = get_file(repo_id, file_path, None, start_line, end_line, decode_escaped)
+    return PlainTextResponse(data.content, media_type="text/plain; charset=utf-8")
