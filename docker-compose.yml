@@ -1,0 +1,51 @@
+services:
+  fastapi:
+    image: ${DOCKER_USERNAME}/gitdeun-ai:${TAG:-latest}
+    container_name: gitdeun-fastapi
+    restart: unless-stopped
+    env_file: [ ./.env ]                 # 컨테이너에 주입할 실제 환경변수
+    environment:
+      TZ: Asia/Seoul
+      # 예: ARANGO_URL은 .env에서 넘겨도 OK
+    depends_on:
+      arangodb:
+        condition: service_healthy
+    networks: [ ai-network ]
+    # Nginx(호스트)로 프록시할 거면 8000만 내부에서 바인딩하고,
+    # 필요 시 공개하려면 "8000:8000" 바인딩. 운영에선 Nginx 443만 노출 권장.
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/healthz | grep -q ok || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    volumes:
+      - ./logs:/app/logs
+
+  arangodb:
+    image: arangodb:3.11
+    container_name: gitdeun-arangodb
+    restart: unless-stopped
+    networks: [ ai-network ]
+    environment:
+      ARANGO_ROOT_PASSWORD: ${ARANGODB_PASSWORD}
+    # 외부 노출 금지(보안그룹에서도 8529 차단)
+    # ports:
+    #   - "8529:8529"
+    healthcheck:
+      test: ["CMD-SHELL", "arangosh --server.endpoint tcp://127.0.0.1:8529 --server.authentication false --javascript.execute-string 'print(\"ok\")' >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    volumes:
+      - arango-data:/var/lib/arangodb3
+
+networks:
+  ai-network:
+    name: gitdeun-fastapi-network
+
+volumes:
+  arango-data:
