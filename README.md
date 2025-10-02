@@ -1,1 +1,1 @@
-# gitdeun-MM
+# gitdeun-AI
