@@ -1,4 +1,22 @@
-fastapi
-uvicorn
-pydantic
-python-dotenv
+fastapi==0.114.*
+uvicorn[standard]==0.30.*
+
+# HTTP 클라이언트
+httpx==0.27.*
+
+# ArangoDB 드라이버
+python-arango==8.1.*
+
+# 데이터 모델
+pydantic==2.9.*
+pydantic-settings==2.5.*    # 설정 관리에 유용
+
+# .env 로딩
+python-dotenv==1.0.*
+
+# Google Gemini (Generative AI)
+google-generativeai==0.7.*
+
+# Github
+PyGithub==2.5.*
+# 설치 실행: pip install -r requirements.txt
