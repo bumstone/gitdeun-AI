@@ -19,9 +19,9 @@ app = FastAPI(
     ]
 )
 
-@app.get("/healthz", status_code=200)
+@app.get("/health", status_code=200)
 def health_check():
-    return {"status": "ok"}
+    return {"status": "UP"}
 
 
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
