@@ -11,10 +11,8 @@ services:
       arangodb:
         condition: service_healthy
     networks: [ ai-network ]
-    # Nginx(호스트)로 프록시할 거면 8000만 내부에서 바인딩하고,
-    # 필요 시 공개하려면 "8000:8000" 바인딩. 운영에선 Nginx 443만 노출 권장.
     ports:
-      - "127.0.0.1:8000:8000"
+      - "8000:8000"
     command: >
       uvicorn main:app
       --host 0.0.0.0 --port 8000
