@@ -1,6 +1,7 @@
 # main.py
 from fastapi import FastAPI
 from routers import auth, mindmap, recommend, meeting, github, repo, suggestion, content
+import logging
 
 app = FastAPI(
     title="Gitdeun API",
@@ -18,6 +19,13 @@ app = FastAPI(
         {"name": "Meeting", "description": "회의록 요약 및 마이그레이션"}
     ]
 )
+
+
+# Uvicorn의 기본 로거 가져오기
+uvicorn_access_logger = logging.getLogger("uvicorn.access")
+# uvicorn.access 로거의 핸들러에서 Health check 로그 필터링
+for handler in uvicorn_access_logger.handlers:
+    handler.addFilter(lambda record: record.getMessage().find("/health") == -1)
 
 @app.get("/health", status_code=200)
 def health_check():
