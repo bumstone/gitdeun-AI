@@ -368,3 +368,61 @@ def upsert_nodes_edges(map_id: str, nodes: list[dict], edges: list[dict], defaul
             ecoll.insert(doc)
 
     return list(set(changed))
+
+def get_mindmap_node(node_key: str):
+    rows = list(db.aql.execute(
+        """
+        FOR n IN mindmap_nodes
+          FILTER n._key == @k
+          LIMIT 1
+          RETURN n
+        """,
+        bind_vars={"k": node_key},
+    ))
+    return rows[0] if rows else None
+
+
+def find_file_path_by_filename(repo_id: str, filename: str) -> str | None:
+    rows = list(db.aql.execute(
+        """
+        FOR f IN repo_files
+          FILTER f.repo_id == @rid
+          LET fname = LAST(SPLIT(f.path, "/"))
+          FILTER fname == @fn
+          SORT LENGTH(f.path) ASC
+          LIMIT 1
+          RETURN f.path
+        """,
+        bind_vars={"rid": repo_id, "fn": filename},
+    ))
+    return rows[0] if rows else None
+
+
+def get_code_recommendation_by_key(suggestion_key: str):
+    rows = list(db.aql.execute(
+        """
+        FOR c IN code_recommendations
+          FILTER c._key == @k
+          LIMIT 1
+          RETURN c
+        """,
+        bind_vars={"k": suggestion_key},
+    ))
+    return rows[0] if rows else None
+
+
+def get_latest_code_recommendation(repo_id: str, file_path: str, source_node_key: str | None):
+    query = """
+    FOR c IN code_recommendations
+      FILTER c.map_id == @rid
+        AND c.file_path == @fp
+        AND (@src == null OR c.source_node_key == @src)
+      SORT DATE_TIMESTAMP(c.created_at) DESC
+      LIMIT 1
+      RETURN c
+    """
+    rows = list(db.aql.execute(
+        query,
+        bind_vars={"rid": repo_id, "fp": file_path, "src": source_node_key}
+    ))
+    return rows[0] if rows else None
