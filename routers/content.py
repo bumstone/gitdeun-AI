@@ -10,8 +10,12 @@ from services.arangodb_service import (
     db,  # AQL 실행용 (이미 env로 초기화됨)
     get_repo_file_content,  # content만 가져오는 헬퍼
     list_repo_files,  # 파일 목록(메타) 헬퍼
-    get_document_by_key, get_mindmap_node, find_file_path_by_filename, get_code_recommendation_by_key,
-    get_latest_code_recommendation
+    get_document_by_key,
+    get_mindmap_node,
+    find_file_path_by_filename,
+    get_code_recommendation_by_key,
+    get_latest_code_recommendation,
+    find_path_by_suffix
 )
 
 router = APIRouter()
@@ -348,13 +352,23 @@ def read_code_by_node(
 
     # 4) 원본 코드 반환
     original = get_repo_file_content(map_id, resolved_path)
+
+    if not original:
+        # 경로가 정확히 일치하지 않으면, '접미사'로 다시 검색
+        guess_path = find_path_by_suffix(map_id, resolved_path)
+
+        if guess_path:
+            original = get_repo_file_content(map_id, guess_path)
+            # 실제 찾은 경로로 변수를 업데이트해줍니다.
+            resolved_path = guess_path
+
     if not original:
         # 파일명이었고 매칭을 못했을 수 있으니 마지막으로 파일명 기준 한 번 더 재시도
         if "/" not in fp_input and resolved_path == fp_input:
-            guess = find_file_path_by_filename(map_id, fp_input)
-            if guess:
-                original = get_repo_file_content(map_id, guess)
-                resolved_path = guess
+            guess_name = find_file_path_by_filename(map_id, fp_input)
+            if guess_name:
+                original = get_repo_file_content(map_id, guess_name)
+                resolved_path = guess_name
 
     if not original:
         raise HTTPException(status_code=404, detail="original code not found")

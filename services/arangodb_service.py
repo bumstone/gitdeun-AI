@@ -426,3 +426,26 @@ def get_latest_code_recommendation(repo_id: str, file_path: str, source_node_key
         bind_vars={"rid": repo_id, "fp": file_path, "src": source_node_key}
     ))
     return rows[0] if rows else None
+
+
+def find_path_by_suffix(repo_id: str, path_suffix: str) -> str | None:
+    """
+    주어진 경로 '접미사'를 기준으로 일치하는 전체 파일 경로를 찾습니다.
+    예: 'main/java/App.java'가 주어지면 'src/main/java/App.java'를 찾습니다.
+    """
+    if not repo_id or not path_suffix:
+        return None
+
+    # LIKE 연산자는 % 문자를 와일드카드로 사용합니다.
+    # CONCAT('%', @suffix)는 @suffix로 끝나는 모든 문자열을 찾습니다.
+    query = """
+    FOR f IN repo_files
+      FILTER f.repo_id == @rid AND f.path LIKE CONCAT('%', @suffix)
+      // 일치하는 경로가 여러 개일 경우 가장 짧은 경로를 선택 (가장 구체적인 경로일 확률이 높음)
+      SORT LENGTH(f.path) ASC
+      LIMIT 1
+      RETURN f.path
+    """
+    cursor = db.aql.execute(query, bind_vars={"rid": repo_id, "suffix": path_suffix})
+
+    return next(iter(cursor), None)
