@@ -136,7 +136,9 @@ def create_code_suggestion_node(
 
     file_name = file_path.split("/")[-1]
     label = f"[AI] {file_name} 개선안 #{suggestion_key}"
-    sugg_node_key = generate_node_key(map_id, "SUGG", label)
+    # 라벨 앞에 SUGG_ 를 붙여 같은 라벨의 마인드맵 노드와 키를 가른다(upsert_code_suggestion_aggregate 의 SUGG_AGG:: 와 같은 방식).
+    # mode 를 없애기 전 3인자 호출 generate_node_key(map_id, "SUGG", label) 이 만들던 키와 같은 값이다.
+    sugg_node_key = generate_node_key(map_id, f"SUGG_{label}")
 
     if not document_exists("code_recommendations", suggestion_key):
         insert_document("code_recommendations", {
